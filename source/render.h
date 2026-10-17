@@ -108,7 +108,8 @@ void route_grade_label(char *out, int size, const Route *r);
 /* Fill a buffer with the static top-screen backdrop (HUD margins). */
 void render_top_backdrop(Canvas *cv);
 
-/* `depth` is the stereo offset in pixels for this eye (0 when 3D is off);
+/* `depth` is this eye's stereo amount: the 3D slider (0..1) for the left eye,
+ * minus it for the right, 0 when 3D is off;
  * nearer things are shifted by more of it. */
 void render_top(Canvas *cv, const UiState *ui, float depth);
 void render_bottom(Canvas *cv, const UiState *ui);

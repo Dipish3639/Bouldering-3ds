@@ -154,6 +154,44 @@ void route_grade_label(char *out, int size, const Route *r)
 }
 
 /* ------------------------------------------------------------------ */
+/* Stereo 3D (top screen only).
+ *
+ * Depth is measured in pixels of shift per eye at full 3D slider; positive
+ * comes out of the screen. The wall itself is tilted by its angle: a slab's
+ * top leans away, an overhang's and a roof's lean out towards you, and the
+ * middle of the top screen sits at the screen's surface. Holds stand out
+ * from the wall and the climber stands out further. */
+
+static struct {
+	float eye;   /* +slider for the left eye, -slider for the right, 0 = flat */
+	float refY;  /* world row at the screen surface */
+	int angle;
+} st;
+
+/* Depth gained per world row going up the wall. */
+static const float WALL_LEAN[ANGLE_COUNT] = { -0.02f, 0.0f, 0.026f, 0.04f };
+static const float HOLD_POP[HOLD_TYPES] = {
+	[HOLD_JUG] = 2.0f, [HOLD_CRIMP] = 1.0f, [HOLD_SLOPER] = 1.8f, [HOLD_PINCH] = 1.6f, [HOLD_FOOT] = 0.7f,
+	[HOLD_EDGE] = 1.2f, [HOLD_POCKET] = 1.4f, [HOLD_UNDERCLING] = 1.8f, [HOLD_VOLUME] = 2.8f,
+};
+#define CLIMBER_POP 3.6f
+
+static void stereo_set(float eye, float refY, int angle)
+{
+	st.eye = eye;
+	st.refY = refY;
+	st.angle = angle >= 0 && angle < ANGLE_COUNT ? angle : ANGLE_VERT;
+}
+
+/* Horizontal shift for something `pop` out from the wall at world row wy. */
+static float sdx(float wy, float pop)
+{
+	if (st.eye == 0)
+		return 0;
+	return st.eye * (WALL_LEAN[st.angle] * (st.refY - wy) + pop);
+}
+
+/* ------------------------------------------------------------------ */
 /* Holds. */
 
 static const float ROT_COS[4] = { 1.0f, 0.7071f, 0.0f, -0.7071f };
@@ -264,7 +302,7 @@ static void draw_tag(Canvas *cv, float x, float y, const char *label)
 
 /* Draw every hold of a route that falls inside a view. World (wx, wy) lands
  * at (wx + ox, wy + oy); `clipH` limits drawing to the top rows of cv. */
-static void draw_holds(Canvas *cv, const Route *r, float ox, float oy, float lift, int clipH, int highlight)
+static void draw_holds(Canvas *cv, const Route *r, float ox, float oy, int clipH, int highlight)
 {
 	uint32_t col = route_color(r);
 	int saveH = cv->h;
@@ -275,7 +313,9 @@ static void draw_holds(Canvas *cv, const Route *r, float ox, float oy, float lif
 			const Hold *h = &r->holds[i];
 			if ((h->type == HOLD_VOLUME) != (pass == 0))
 				continue;
-			float x = h->x + ox, y = h->y + oy;
+			/* The shadow sits on the (tilted) wall; the hold stands out from it. */
+			float x = h->x + ox + sdx(h->y, 0), y = h->y + oy;
+			float lift = st.eye * HOLD_POP[h->type];
 			if (y < -24 || y > clipH + 24 || x < -24 || x > cv->w + 24)
 				continue;
 			draw_hold_shape(cv, x, y, h->type, h->rot, col, lift, 1.0f);
@@ -291,7 +331,7 @@ static void draw_holds(Canvas *cv, const Route *r, float ox, float oy, float lif
 
 /* Numbered beta moves next to their holds: hands white, feet grey, moves
  * already made dimmed. Offsets keep the four limbs' numbers apart. */
-static void draw_beta(Canvas *cv, const Route *r, float ox, float oy, float lift, int clipH, int done)
+static void draw_beta(Canvas *cv, const Route *r, float ox, float oy, int clipH, int done)
 {
 	static const float DX[LIMBS] = { -10, 10, -10, 10 }, DY[LIMBS] = { -10, -10, 10, 10 };
 	int saveH = cv->h;
@@ -299,7 +339,7 @@ static void draw_beta(Canvas *cv, const Route *r, float ox, float oy, float lift
 	for (int i = 0; i < r->nbeta; i++) {
 		const BetaMove *m = &r->beta[i];
 		const Hold *h = &r->holds[m->hold];
-		float x = h->x + ox + lift + DX[m->limb], y = h->y + oy + DY[m->limb];
+		float x = h->x + ox + sdx(h->y, HOLD_POP[h->type] + 0.8f) + DX[m->limb], y = h->y + oy + DY[m->limb];
 		if (y < -8 || y > clipH + 8)
 			continue;
 		bool hand = m->limb <= LIMB_RH;
@@ -316,10 +356,13 @@ static void draw_beta(Canvas *cv, const Route *r, float ox, float oy, float lift
 /* ------------------------------------------------------------------ */
 /* Climber. */
 
+/* Screen x and y of a world point on the climber, shifted for stereo. */
+#define CP(wx, wy) ((wx) + ox + sdx((wy), CLIMBER_POP)), ((wy) + oy)
+
 static void draw_climber(Canvas *cv, const Climber *c, float ox, float oy, bool labels)
 {
-	float bx = c->body.x + ox, by = c->body.y + oy;
-	if (by < -80 || by > cv->h + 90)
+	float bx = c->body.x, by = c->body.y;
+	if (by + oy < -80 || by + oy > cv->h + 90)
 		return;
 	float pump = 1.0f - c->stamina;
 	uint32_t skin = rgb_mix(SKIN, 0xE0503C, (int)(pump * pump * 170));
@@ -327,34 +370,34 @@ static void draw_climber(Canvas *cv, const Climber *c, float ox, float oy, bool 
 	/* Legs first: they're behind the torso. */
 	for (int f = LIMB_LF; f <= LIMB_RF; f++) {
 		Vec j = climb_joint(c, f), k = climb_bend(c, f), e = c->end[f];
-		cv_capsule(cv, j.x + ox, j.y + oy, k.x + ox, k.y + oy, 4.6f, PANTS, 255);
-		cv_capsule(cv, k.x + ox, k.y + oy, e.x + ox, e.y + oy, 3.8f, PANTS, 255);
+		cv_capsule(cv, CP(j.x, j.y), CP(k.x, k.y), 4.6f, PANTS, 255);
+		cv_capsule(cv, CP(k.x, k.y), CP(e.x, e.y), 3.8f, PANTS, 255);
 		/* Shoe pointing into the wall: a short capsule along the shin's end. */
 		float dx = e.x - k.x, dy = e.y - k.y, l = sqrtf(dx * dx + dy * dy);
 		if (l < 0.01f) l = 1;
 		float toe = f == LIMB_LF ? -1.0f : 1.0f;
-		cv_capsule(cv, e.x + ox - dx / l * 3, e.y + oy - dy / l * 3, e.x + ox + toe * 3, e.y + oy + 1, 3.6f, SHOE, 255);
-		cv_capsule(cv, e.x + ox - 1, e.y + oy + 2.5f, e.x + ox + toe * 3.5f, e.y + oy + 2.5f, 1.4f, RUBBER, 255);
+		cv_capsule(cv, CP(e.x - dx / l * 3, e.y - dy / l * 3), CP(e.x + toe * 3, e.y + 1), 3.6f, SHOE, 255);
+		cv_capsule(cv, CP(e.x - 1, e.y + 2.5f), CP(e.x + toe * 3.5f, e.y + 2.5f), 1.4f, RUBBER, 255);
 	}
 
 	/* Torso, hips and chalk bag. */
-	cv_capsule(cv, bx, by + SHOULDER_DY + 3, bx, by + HIP_DY - 4, 10.5f, SHIRT, 255);
-	cv_capsule(cv, bx - 6, by + SHOULDER_DY + 6, bx - 6, by + 4, 2.0f, rgb_mix(SHIRT, 0xFFFFFF, 60), 90);
-	cv_capsule(cv, bx - HIP_DX, by + HIP_DY - 2, bx + HIP_DX, by + HIP_DY - 2, 6.0f, PANTS, 255);
-	cv_disc(cv, bx + 2, by + HIP_DY - 1, 4.6f, CHALK, 255);
-	cv_capsule(cv, bx - 2, by + HIP_DY - 4, bx + 6, by + HIP_DY - 4, 1.2f, 0x6B6355, 255);
+	cv_capsule(cv, CP(bx, by + SHOULDER_DY + 3), CP(bx, by + HIP_DY - 4), 10.5f, SHIRT, 255);
+	cv_capsule(cv, CP(bx - 6, by + SHOULDER_DY + 6), CP(bx - 6, by + 4), 2.0f, rgb_mix(SHIRT, 0xFFFFFF, 60), 90);
+	cv_capsule(cv, CP(bx - HIP_DX, by + HIP_DY - 2), CP(bx + HIP_DX, by + HIP_DY - 2), 6.0f, PANTS, 255);
+	cv_disc(cv, CP(bx + 2, by + HIP_DY - 1), 4.6f, CHALK, 255);
+	cv_capsule(cv, CP(bx - 2, by + HIP_DY - 4), CP(bx + 6, by + HIP_DY - 4), 1.2f, 0x6B6355, 255);
 
 	/* Neck and head (seen from behind: mostly hair). */
-	cv_capsule(cv, bx, by + SHOULDER_DY, bx, by + HEAD_DY + 4, 3.2f, skin, 255);
-	cv_disc(cv, bx, by + HEAD_DY, 7.8f, HAIR, 255);
-	cv_disc(cv, bx - 2.5f, by + HEAD_DY - 3, 3.0f, rgb_mix(HAIR, 0xFFFFFF, 40), 120);
+	cv_capsule(cv, CP(bx, by + SHOULDER_DY), CP(bx, by + HEAD_DY + 4), 3.2f, skin, 255);
+	cv_disc(cv, CP(bx, by + HEAD_DY), 7.8f, HAIR, 255);
+	cv_disc(cv, CP(bx - 2.5f, by + HEAD_DY - 3), 3.0f, rgb_mix(HAIR, 0xFFFFFF, 40), 120);
 
 	/* Arms. */
 	for (int h = LIMB_LH; h <= LIMB_RH; h++) {
 		Vec j = climb_joint(c, h), k = climb_bend(c, h), e = c->end[h];
-		cv_capsule(cv, j.x + ox, j.y + oy, k.x + ox, k.y + oy, 3.9f, SHIRT, 255);
-		cv_capsule(cv, k.x + ox, k.y + oy, e.x + ox, e.y + oy, 3.3f, skin, 255);
-		cv_disc(cv, e.x + ox, e.y + oy, 3.7f, rgb_mix(skin, CHALK, 140), 255);
+		cv_capsule(cv, CP(j.x, j.y), CP(k.x, k.y), 3.9f, SHIRT, 255);
+		cv_capsule(cv, CP(k.x, k.y), CP(e.x, e.y), 3.3f, skin, 255);
+		cv_disc(cv, CP(e.x, e.y), 3.7f, rgb_mix(skin, CHALK, 140), 255);
 	}
 
 	if (labels && c->state == CL_CLIMBING && c->moving < 0) {
@@ -375,16 +418,19 @@ static void draw_reach(Canvas *cv, const Climber *c, float ox, float oy, int fra
 	if (c->moving < 0 || c->state != CL_CLIMBING)
 		return;
 	Vec j = climb_joint(c, c->moving);
-	cv_ring(cv, j.x + ox, j.y + oy, limb_reach(c->moving), 1.2f, 0xFFFFFF, 60);
+	cv_ring(cv, CP(j.x, j.y), limb_reach(c->moving), 1.2f, 0xFFFFFF, 60);
 	Vec e = c->end[c->moving];
 	if (c->targetHold >= 0) {
 		const Hold *h = &c->route->holds[c->targetHold];
 		float pulse = 2.0f * sinf(frame * 0.25f);
-		cv_ring(cv, h->x + ox, h->y + oy, HOLD_INFO[h->type].grab + 3 + pulse, 2.0f, 0x6CF59A, 230);
+		cv_ring(cv, h->x + ox + sdx(h->y, HOLD_POP[h->type]), h->y + oy, HOLD_INFO[h->type].grab + 3 + pulse, 2.0f,
+		        0x6CF59A, 230);
 	} else {
-		cv_ring(cv, e.x + ox, e.y + oy, 7, 1.4f, 0xFFFFFF, 150);
+		cv_ring(cv, CP(e.x, e.y), 7, 1.4f, 0xFFFFFF, 150);
 	}
 }
+
+#undef CP
 
 /* ------------------------------------------------------------------ */
 /* Wall views. */
@@ -409,7 +455,31 @@ static void draw_wall(Canvas *cv, int x, int y, int h, float worldTop)
 		int ch = -wt < h ? -wt : h;
 		draw_ceiling(cv, x, y, WALL_W, ch, worldTop);
 	}
-	cv_blit(cv, x, y + (wt < 0 ? -wt : 0), &wallCv, 0, wt < 0 ? 0 : wt, WALL_W, h - (wt < 0 ? -wt : 0));
+	int top = wt < 0 ? -wt : 0;
+	if (st.eye == 0) {
+		cv_blit(cv, x, y + top, &wallCv, 0, wt + top, WALL_W, h - top);
+		return;
+	}
+	/* In 3D each row shifts by the wall's depth there. Rows with the same
+	 * shift are blitted together, clipped to the wall's window. */
+	Canvas view = *cv;
+	view.base = cv->base + x * cv->xs;
+	view.w = WALL_W;
+	int r0 = top;
+	int s0 = (int)lroundf(sdx(wt + r0, 0));
+	for (int r = top + 1; r <= h; r++) {
+		int sh = r < h ? (int)lroundf(sdx(wt + r, 0)) : s0 + 1000;
+		if (sh == s0)
+			continue;
+		cv_blit(&view, s0, y + r0, &wallCv, 0, wt + r0, WALL_W, r - r0);
+		/* Fill the sliver the shift uncovers with the gym's dark backdrop. */
+		if (s0 > 0)
+			cv_fill(&view, 0, y + r0, s0, r - r0, C_BG_TOP);
+		else if (s0 < 0)
+			cv_fill(&view, WALL_W + s0, y + r0, -s0, r - r0, C_BG_TOP);
+		r0 = r;
+		s0 = sh;
+	}
 }
 
 /* A thin overview of the whole route: holds, the visible window and the climber. */
@@ -483,13 +553,13 @@ static void top_climb(Canvas *cv, const UiState *ui, float depth)
 	const Route *r = ui->route;
 	const Climber *c = ui->climber;
 	float worldTop = ui->camY - TOP_H;
-	int hud = (int)lroundf(depth * 1.6f);
+	int hud = (int)lroundf(depth * 2.5f);
 	draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
-	draw_holds(cv, r, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, -1);
+	draw_holds(cv, r, TOP_WALL_X, -worldTop, TOP_H, -1);
 	if (ui->showBeta || ui->watching)
-		draw_beta(cv, r, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, ui->watching ? ui->betaStep : 0);
-	draw_reach(cv, c, TOP_WALL_X + depth, -worldTop, ui->frame);
-	draw_climber(cv, c, TOP_WALL_X + depth, -worldTop, false);
+		draw_beta(cv, r, TOP_WALL_X, -worldTop, TOP_H, ui->watching ? ui->betaStep : 0);
+	draw_reach(cv, c, TOP_WALL_X, -worldTop, ui->frame);
+	draw_climber(cv, c, TOP_WALL_X, -worldTop, false);
 
 	char right[32], t[16];
 	format_time(t, sizeof(t), c->frames);
@@ -528,9 +598,9 @@ static void top_edit(Canvas *cv, const UiState *ui, float depth)
 {
 	const Route *r = ui->route;
 	float worldTop = ui->camY - TOP_H;
-	int hud = (int)lroundf(depth * 1.6f);
+	int hud = (int)lroundf(depth * 2.5f);
 	draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
-	draw_holds(cv, r, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, ui->activeHold);
+	draw_holds(cv, r, TOP_WALL_X, -worldTop, TOP_H, ui->activeHold);
 
 	char right[40], g[8];
 	route_grade_label(g, sizeof(g), r);
@@ -665,10 +735,10 @@ static void top_working(Canvas *cv, const UiState *ui, float depth)
 	if (ui->route && ui->climber) {
 		float worldTop = ui->camY - TOP_H;
 		draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
-		draw_holds(cv, ui->route, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, -1);
-		draw_climber(cv, ui->climber, TOP_WALL_X + depth, -worldTop, false);
+		draw_holds(cv, ui->route, TOP_WALL_X, -worldTop, TOP_H, -1);
+		draw_climber(cv, ui->climber, TOP_WALL_X, -worldTop, false);
 	}
-	int hud = (int)lroundf(depth * 1.6f);
+	int hud = (int)lroundf(depth * 2.5f);
 	top_header(cv, ui->workTitle ? ui->workTitle : "", ui->workSub ? ui->workSub : "", C_ACCENT, hud);
 	int w = 260, x = (TOP_W - w) / 2 + hud, y = TOP_H - 22;
 	panel(cv, x - 3, y - 3, w + 6, 12, 0x000000, 170);
@@ -681,11 +751,11 @@ static void top_title(Canvas *cv, const UiState *ui, float depth)
 	if (ui->route && ui->climber) {
 		float worldTop = WALL_H - TOP_H;
 		draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
-		draw_holds(cv, ui->route, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, -1);
-		draw_climber(cv, ui->climber, TOP_WALL_X + depth, -worldTop, false);
+		draw_holds(cv, ui->route, TOP_WALL_X, -worldTop, TOP_H, -1);
+		draw_climber(cv, ui->climber, TOP_WALL_X, -worldTop, false);
 		cv_blend(cv, 0, 0, TOP_W, TOP_H, 0x000000, 60);
 	}
-	int dx = (int)lroundf(depth * 2.2f);
+	int dx = (int)lroundf(depth * 6.0f);
 	cv_blend(cv, 0, 10, TOP_W, 84, 0x000000, 150);
 	text_shadow(cv, &FONT_HUGE, TOP_W / 2 + dx, 24, "BOULDER", C_TEXT, 255, 6, ALIGN_CENTER);
 	cv_text(cv, &FONT_MED, TOP_W / 2 + dx, 70, "S E T   -   C L I M B   -   S E N D", C_ACCENT, 255, 0, ALIGN_CENTER);
@@ -694,6 +764,9 @@ static void top_title(Canvas *cv, const UiState *ui, float depth)
 
 void render_top(Canvas *cv, const UiState *ui, float depth)
 {
+	/* The title shows the bottom of the wall; other screens the rows above camY. */
+	float centre = ui->screen == SCR_TITLE ? WALL_H - TOP_H / 2 : ui->camY - TOP_H / 2;
+	stereo_set(depth, centre, ui->route ? ui->route->angle : ANGLE_VERT);
 	switch (ui->screen) {
 	case SCR_LOADING:
 		text_shadow(cv, &FONT_BIG, TOP_W / 2, 100, "BOULDER 3DS", C_TEXT, 255, 2, ALIGN_CENTER);
@@ -859,7 +932,7 @@ static void bottom_edit(Canvas *cv, const UiState *ui)
 {
 	const Route *r = ui->route;
 	draw_wall(cv, 0, 0, EDIT_VIEW_H, ui->camY);
-	draw_holds(cv, r, 0, -ui->camY, 0, EDIT_VIEW_H, ui->activeHold);
+	draw_holds(cv, r, 0, -ui->camY, EDIT_VIEW_H, ui->activeHold);
 	/* Height guide for start holds. */
 	float startLine = FLOOR_Y - 128 - ui->camY;
 	if (startLine > 0 && startLine < EDIT_VIEW_H)
@@ -883,9 +956,9 @@ static void bottom_climb(Canvas *cv, const UiState *ui)
 {
 	const Climber *c = ui->climber;
 	draw_wall(cv, 0, 0, BOT_H, ui->camY);
-	draw_holds(cv, ui->route, 0, -ui->camY, 0, BOT_H, -1);
+	draw_holds(cv, ui->route, 0, -ui->camY, BOT_H, -1);
 	if (ui->showBeta || ui->watching)
-		draw_beta(cv, ui->route, 0, -ui->camY, 0, BOT_H, ui->watching ? ui->betaStep : 0);
+		draw_beta(cv, ui->route, 0, -ui->camY, BOT_H, ui->watching ? ui->betaStep : 0);
 	draw_reach(cv, c, 0, -ui->camY, ui->frame);
 	draw_climber(cv, c, 0, -ui->camY, !ui->watching);
 	const char *hint = NULL;
@@ -919,6 +992,7 @@ static void bottom_working(Canvas *cv, const UiState *ui)
 
 void render_bottom(Canvas *cv, const UiState *ui)
 {
+	stereo_set(0, 0, ANGLE_VERT); /* the bottom screen is flat */
 	switch (ui->screen) {
 	case SCR_LOADING:
 		cv_vgradient(cv, 0, 0, BOT_W, BOT_H, C_BG_TOP, C_BG_BOT);

@@ -37,6 +37,25 @@ static void shot(const char *dir, const char *prefix, const UiState *ui)
 	save(name, bot, BOT_W, BOT_H);
 }
 
+/* Red/cyan anaglyph of the top screen's two eyes at full 3D, to check depth. */
+static uint8_t eyeL[TOP_W * TOP_H * 3], eyeR[TOP_W * TOP_H * 3];
+
+static void stereo_shot(const char *dir, const char *prefix, const UiState *ui)
+{
+	Canvas cl, cr;
+	cv_init_linear(&cl, eyeL, TOP_W, TOP_H);
+	cv_init_linear(&cr, eyeR, TOP_W, TOP_H);
+	render_top_backdrop(&cl);
+	render_top_backdrop(&cr);
+	render_top(&cl, ui, 1.0f);
+	render_top(&cr, ui, -1.0f);
+	char name[256];
+	snprintf(name, sizeof(name), "%s/%s_left.ppm", dir, prefix);
+	save(name, eyeL, TOP_W, TOP_H);
+	snprintf(name, sizeof(name), "%s/%s_right.ppm", dir, prefix);
+	save(name, eyeR, TOP_W, TOP_H);
+}
+
 static void step(Climber *c, int frames)
 {
 	for (int i = 0; i < frames; i++)
@@ -186,6 +205,15 @@ int main(int argc, char **argv)
 	         HOLD_INFO[gr.holds[gr.beta[upto].hold].type].name);
 	ui.betaText = bt;
 	shot(dir, "watch_beta", &ui);
+	for (int a = 0; a < ANGLE_COUNT; a++) {
+		gr.angle = (uint8_t)a;
+		render_wall_texture(a);
+		char n[32];
+		snprintf(n, sizeof(n), "stereo_%d", a);
+		stereo_shot(dir, n, &ui);
+	}
+	gr.angle = gen.result.angle;
+	render_wall_texture(gr.angle);
 
 	/* The working screen while the solver is on the wall. */
 	static Beta b;

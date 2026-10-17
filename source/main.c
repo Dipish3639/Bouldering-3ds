@@ -1084,9 +1084,9 @@ static void draw_frame(void)
 		stereo = want;
 		gfxSet3D(stereo);
 	}
-	draw_top(GFX_LEFT, stereo ? slider * 3.0f : 0);
+	draw_top(GFX_LEFT, stereo ? slider : 0);
 	if (stereo)
-		draw_top(GFX_RIGHT, -slider * 3.0f);
+		draw_top(GFX_RIGHT, -slider);
 
 	Canvas cv;
 	u8 *fb = gfxGetFramebuffer(GFX_BOTTOM, GFX_LEFT, NULL, NULL);

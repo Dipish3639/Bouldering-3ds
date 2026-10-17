@@ -38,9 +38,26 @@ and the best way up, and can show you the moves.
 - Up to 12 routes, saved to `sdmc:/3ds/bouldering3ds/routes.dat`. Three sample
   routes are there to start with: **Warm Up** (slab), **Crimp Ladder**
   (vertical) and **The Cave** (overhang)
-- Stereoscopic 3D: holds and the climber stand off the wall when the 3D slider
-  is up
+- Stereoscopic 3D on the top screen (see below)
 - Music and sound effects synthesised on the console at start-up
+
+## 3D
+
+Push the 3D slider up and the top screen gets depth:
+
+- **The wall leans the way it's built.** A slab's top tilts away from you, a
+  vertical wall stays flat, an overhang leans out over you and a roof leans out
+  furthest. Each row of the wall has its own depth, so you can see the angle
+- **Holds stick out of the wall** by their size: volumes and jugs the most,
+  slopers, pinches and underclings a bit less, crimps and foot chips only just.
+  Their shadows stay on the wall underneath them
+- **The climber hangs off the wall** in front of the holds, and the HUD floats
+  in front of everything
+- The slider sets how strong it is; the bottom screen stays flat
+
+![3D roof, red/cyan](docs/3d-roof-anaglyph.png)
+
+(A roof in red/cyan anaglyph, if you have the glasses. On the 3DS it's real 3D.)
 
 ## Install with a QR code (no computer needed)
 

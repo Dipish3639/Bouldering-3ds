@@ -1,0 +1,75 @@
+name: Build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  PROJECT_CTR_REF: d52c2b0e788c2d085763d7c5dcc4b2edd9ffb7d8
+  BANNERTOOL_REF: 16d8c5a0ce02a5e06e64ab42275132fca57c04a2
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: devkitpro/devkitarm:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build .3dsx
+        run: make
+
+      - name: Install host build tools
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential git zip ca-certificates
+
+      - name: Host tests (climbing bot and scripted play-through)
+        run: |
+          tools/simtest.sh
+          tools/smoketest.sh
+
+      - name: Build makerom and bannertool
+        run: |
+          mkdir -p /opt/ctrtools
+          git clone https://github.com/3DSGuy/Project_CTR /tmp/Project_CTR
+          git -C /tmp/Project_CTR checkout "$PROJECT_CTR_REF"
+          make -C /tmp/Project_CTR/makerom -j"$(nproc)"
+          cp /tmp/Project_CTR/makerom/bin/makerom /opt/ctrtools/
+          git clone https://github.com/diasurgical/bannertool /tmp/bannertool
+          git -C /tmp/bannertool checkout "$BANNERTOOL_REF"
+          git -C /tmp/bannertool submodule update --init --recursive
+          make -C /tmp/bannertool -j"$(nproc)"
+          cp /tmp/bannertool/output/linux-x86_64/bannertool /opt/ctrtools/
+
+      - name: Build .cia
+        run: make cia MAKEROM=/opt/ctrtools/makerom BANNERTOOL=/opt/ctrtools/bannertool
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bouldering3ds
+          path: |
+            bouldering3ds.3dsx
+            bouldering3ds.cia
+
+      # Every push to the default branch becomes a release, so
+      # https://github.com/<owner>/<repo>/releases/latest/download/bouldering3ds.cia
+      # always serves the newest build (handy for FBI's QR code install).
+      - name: Publish release
+        if: github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Boulder 3DS build ${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          body: |
+            Install on a 3DS with FBI: **Remote Install -> Scan QR Code** and scan the QR code
+            in the README, or download `bouldering3ds.cia` below and install it from the SD card.
+            `bouldering3ds.3dsx` is for the Homebrew Launcher.
+          files: |
+            bouldering3ds.cia
+            bouldering3ds.3dsx

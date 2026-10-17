@@ -34,6 +34,7 @@ uint32_t rgb_mix(uint32_t a, uint32_t b, int t); /* t = 0..255 towards b */
 void cv_disc(Canvas *cv, float cx, float cy, float r, uint32_t rgb, int alpha);
 void cv_ring(Canvas *cv, float cx, float cy, float r, float thick, uint32_t rgb, int alpha);
 /* A line segment with round ends: every pixel within r of (x0,y0)-(x1,y1). */
+void cv_tri(Canvas *cv, float x0, float y0, float x1, float y1, float x2, float y2, uint32_t rgb, int alpha);
 void cv_capsule(Canvas *cv, float x0, float y0, float x1, float y1, float r, uint32_t rgb, int alpha);
 
 /* Copy a w*h block from src (sx, sy) to dst (dx, dy), clipped to both. */

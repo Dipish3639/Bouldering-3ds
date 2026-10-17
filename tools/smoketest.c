@@ -128,19 +128,25 @@ static bool script(void)
 	circleNow.dx = circleNow.dy = 0;
 	phaseFrame++;
 	switch (phase) {
-	case 0: /* title: wait, toggle 3D on, start */
+	case 0: /* first run grades the samples, then the title; turn 3D on, start */
 		slider = 0.6f;
-		if (phaseFrame == 20) {
-			check(mode == MODE_TITLE, "starts on the title screen");
+		if (phaseFrame == 2)
+			check(mode == MODE_WORK && job == JOB_GRADE_ALL, "first run grades the sample routes");
+		if (mode == MODE_TITLE && phaseFrame > 20) {
+			printf("samples graded after %d frames: %d %d %d\n", phaseFrame,
+			       book.routes[0].grade, book.routes[1].grade, book.routes[2].grade);
+			for (int i = 0; i < 3; i++)
+				check(book.routes[i].grade <= 12 && book.routes[i].nbeta > 0, "every sample gets a grade and a beta");
 			keysNow = KEY_A;
 			next_phase();
 		}
+		check(phaseFrame < 5000, "grading the samples finishes");
 		break;
 	case 1: /* list: select the crimp route and climb it */
 		if (phaseFrame == 5) check(mode == MODE_LIST, "A opens the route list");
 		if (phaseFrame == 10) keysNow = KEY_DDOWN;
 		if (phaseFrame == 15) {
-			check(ui.listSel == 2, "down moves the selection");
+			check(ui.listSel == LIST_FIRST + 1, "down moves the selection");
 			keysNow = KEY_A;
 		}
 		if (phaseFrame == 20) {
@@ -202,7 +208,7 @@ static bool script(void)
 			if (phaseFrame == 5) keysNow = KEY_START;
 			if (phaseFrame == 10) {
 				check(ui.menuOpen, "START opens the pause menu");
-				tap(160, MENU_ROW_Y + 2 * MENU_ROW_H + 5);
+				tap(160, MENU_ROW_Y + 3 * MENU_ROW_H + 5);
 			}
 		}
 		if (phaseFrame == 20) {
@@ -241,10 +247,10 @@ static bool script(void)
 		break;
 	}
 	case 8: /* mark starts (S tool) and the top (TOP tool) */
-		if (phaseFrame == 1) { ui.camY = 450; tap(TOOL_START * TOOL_W + 20, 220); }
+		if (phaseFrame == 1) { ui.camY = 450; tap(TOOL_X0 + TOOL_START * TOOL_W + 13, 220); }
 		if (phaseFrame == 3) tap(150, (int)(585 - ui.camY));
 		if (phaseFrame == 5) tap(180, (int)(588 - ui.camY));
-		if (phaseFrame == 7) { ui.camY = 0; tap(TOOL_TOP * TOOL_W + 20, 220); }
+		if (phaseFrame == 7) { ui.camY = 0; tap(TOOL_X0 + TOOL_TOP * TOOL_W + 13, 220); }
 		if (phaseFrame == 9) tap(165, 30);
 		if (phaseFrame == 12) {
 			check(route_count_role(&editRoute, ROLE_START) == 2, "start tool marks start holds");
@@ -253,14 +259,14 @@ static bool script(void)
 		}
 		/* Drag a hold, rotate one with a tap, erase one. */
 		if (phaseFrame == 14) { keysNow = KEY_L; } /* tool back to TOP -> START */
-		if (phaseFrame == 16) { tap(0 * TOOL_W + 20, 220); }        /* JUG tool */
+		if (phaseFrame == 16) { tap(TOOL_X0 + TOOL_JUG * TOOL_W + 13, 220); }
 		if (phaseFrame >= 18 && phaseFrame < 30) tap(140 + (phaseFrame - 18) * 2, 70);
 		if (phaseFrame == 32) {
 			int h = route_hold_at(&editRoute, 162, 70, 2);
 			check(h >= 0, "dragging moves a hold");
 		}
 		if (phaseFrame == 34) tap(185, 95);
-		if (phaseFrame == 38) tap(TOOL_ERASE * TOOL_W + 20, 220);
+		if (phaseFrame == 38) tap(TOOL_X0 + TOOL_ERASE * TOOL_W + 13, 220);
 		if (phaseFrame == 40) tap(190, 170);
 		if (phaseFrame == 44) {
 			check(editRoute.nholds == 21, "erase removes a hold");
@@ -271,7 +277,7 @@ static bool script(void)
 		if (phaseFrame == 2) keysNow = KEY_X;
 		if (phaseFrame == 5) check(mode == MODE_CLIMB && ui.testing, "X test-climbs the route");
 		if (phaseFrame == 8) keysNow = KEY_START;
-		if (phaseFrame == 12) tap(160, MENU_ROW_Y + 2 * MENU_ROW_H + 5);
+		if (phaseFrame == 12) tap(160, MENU_ROW_Y + 3 * MENU_ROW_H + 5);
 		if (phaseFrame == 16) {
 			check(mode == MODE_EDIT, "back to the editor after testing");
 			next_phase();
@@ -279,17 +285,22 @@ static bool script(void)
 		break;
 	case 10: /* editor menu: rename, change wall angle, save */
 		if (phaseFrame == 2) keysNow = KEY_START;
-		if (phaseFrame == 6) tap(160, MENU_ROW_Y + 2 * MENU_ROW_H + 5); /* rename */
-		if (phaseFrame == 10) tap(160, MENU_ROW_Y + 3 * MENU_ROW_H + 5); /* wall angle */
+		if (phaseFrame == 6) tap(160, MENU_ROW_Y + 3 * MENU_ROW_H + 5); /* rename */
+		if (phaseFrame == 10) tap(160, MENU_ROW_Y + 4 * MENU_ROW_H + 5); /* wall angle */
 		if (phaseFrame == 14) {
 			check(strcmp(editRoute.name, "MY ? PROBLEM") == 0, "rename uppercases and strips non-ASCII");
 			check(editRoute.angle == ANGLE_OVERHANG, "wall angle cycles");
 			tap(160, MENU_ROW_Y + 0 * MENU_ROW_H + 5); /* save & exit */
 		}
-		if (phaseFrame == 20) {
-			check(mode == MODE_LIST && book.count == 4, "save adds the route to the book");
+		if (phaseFrame == 18)
+			check(mode == MODE_WORK && job == JOB_SAVE, "saving grades the route first");
+		if (phaseFrame > 18 && mode == MODE_LIST) {
+			check(book.count == 4, "save adds the route to the book");
+			check(book.routes[3].grade <= 12 && book.routes[3].nbeta > 0, "the saved route has a grade and beta");
+			printf("new route graded V%d with %d moves after %d frames\n", book.routes[3].grade, book.routes[3].nbeta, phaseFrame);
 			next_phase();
 		}
+		check(phaseFrame < 3000, "grading finishes");
 		break;
 	case 11: /* climb the new route with buttons: just make sure it runs */
 		if (phaseFrame == 2) keysNow = KEY_A;
@@ -303,26 +314,74 @@ static bool script(void)
 			}
 		}
 		if (phaseFrame == 210) keysNow = KEY_START;
-		if (phaseFrame == 214) tap(160, MENU_ROW_Y + 2 * MENU_ROW_H + 5);
+		if (phaseFrame == 214) tap(160, MENU_ROW_Y + 3 * MENU_ROW_H + 5);
 		if (phaseFrame == 220) {
 			check(mode == MODE_LIST, "back to the list");
 			next_phase();
 		}
 		break;
-	case 12: /* delete it (Y twice), then back to the title */
-		if (phaseFrame == 2) keysNow = KEY_Y;
-		if (phaseFrame == 6) keysNow = KEY_Y;
+	case 12: /* watch the beta of the new route: it must top out */
+		if (phaseFrame == 2) keysNow = KEY_SELECT;
+		if (phaseFrame == 5) check(mode == MODE_CLIMB && ui.watching, "SELECT plays the beta");
+		if (phaseFrame > 5 && climber.state == CL_TOPPED) {
+			printf("beta replay topped out after %d frames\n", phaseFrame);
+			keysNow = KEY_B;
+			next_phase();
+		} else if (phaseFrame > 5 && (climber.state == CL_FELL || phaseFrame > 6000)) {
+			check(false, "the beta replay tops out");
+			keysNow = KEY_B;
+			next_phase();
+		}
+		break;
+	case 13: /* generate a V4 route */
+		if (phaseFrame == 2) check(mode == MODE_LIST, "B leaves the beta");
+		if (phaseFrame >= 3 && phaseFrame < 20 && ui.listSel != LIST_GENERATE && (phaseFrame & 1))
+			keysNow = KEY_DUP;
+		if (phaseFrame == 22) keysNow = KEY_A;
+		if (phaseFrame == 26) {
+			check(ui.menuOpen && menuKind == MENU_GENERATE, "A on generate opens its menu");
+			keysNow = KEY_DRIGHT; /* V3 -> V4 */
+		}
+		if (phaseFrame == 30) {
+			check(genGrade == 4, "right raises the grade");
+			tap(160, MENU_ROW_Y + 2 * MENU_ROW_H + 5); /* set it! */
+		}
+		if (phaseFrame == 34) check(mode == MODE_WORK && job == JOB_GENERATE, "generating runs");
+		if (phaseFrame > 34 && mode == MODE_EDIT) {
+			printf("generated %s V%d (%d holds, %d moves) after %d frames\n", editRoute.name, editRoute.grade,
+			       editRoute.nholds, editRoute.nbeta, phaseFrame);
+			check(editRoute.grade <= 12 && abs(editRoute.grade - 4) <= 2, "generated route is near the grade asked for");
+			check(editRoute.nbeta > 0 && route_problem(&editRoute) == NULL, "generated route is climbable");
+			next_phase();
+		}
+		check(phaseFrame < 20000, "generating finishes");
+		break;
+	case 14: /* leave the editor without saving */
+		if (phaseFrame == 2) keysNow = KEY_START;
+		if (phaseFrame == 6) tap(160, MENU_ROW_Y + 6 * MENU_ROW_H + 5);
 		if (phaseFrame == 10) {
+			check(mode == MODE_LIST && book.count == 4, "exit without saving keeps the book");
+			next_phase();
+		}
+		break;
+	case 15: { /* select the new route, delete it (Y twice), then back to the title */
+		if (phaseFrame < 20 && ui.listSel != LIST_FIRST + 3 && (phaseFrame & 1))
+			keysNow = KEY_DDOWN;
+		int f = phaseFrame - 20;
+		if (f == 2) keysNow = KEY_Y;
+		if (f == 6) keysNow = KEY_Y;
+		if (f == 10) {
 			check(book.count == 3, "Y twice deletes the route");
 			keysNow = KEY_B;
 		}
-		if (phaseFrame == 14) {
+		if (f == 14) {
 			check(mode == MODE_TITLE, "B goes back to the title");
 			keysNow = KEY_START;
 		}
-		if (phaseFrame == 18)
+		if (f == 18)
 			return false;
 		break;
+	}
 	}
 	return true;
 }
@@ -344,7 +403,7 @@ void hidScanInput(void)
 int main(void)
 {
 	game_main();
-	check(phase == 12, "script reached the end");
+	check(phase == 15 && frame < 20000, "script reached the end");
 	printf("%s after %d frames\n", failures ? "FAILED" : "passed", frame);
 	return failures ? 1 : 0;
 }

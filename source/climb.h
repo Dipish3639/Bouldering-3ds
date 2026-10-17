@@ -44,6 +44,7 @@ typedef struct {
 	float stamina;    /* 0..1 */
 	float handLoad[2];/* share of body weight each hand holds (for the HUD) */
 	float drain;      /* stamina change per frame, negative when recovering */
+	float spent;      /* total stamina drained so far (recovery not counted) */
 	bool leftGround;
 	int frames, moves;
 	int fallTimer;
@@ -72,6 +73,8 @@ Vec climb_joint(const Climber *c, int limb);
 /* Elbow / knee position for drawing. */
 Vec climb_bend(const Climber *c, int limb);
 float limb_reach(int limb);
+/* How hard the hold under a hand is to hang on to right now. */
+float climb_hand_difficulty(const Climber *c, int hand);
 bool limb_is_hand(int limb);
 
 #endif

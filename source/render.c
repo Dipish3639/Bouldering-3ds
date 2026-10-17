@@ -4,7 +4,14 @@
 #include <string.h>
 
 const char *const TOOL_NAMES[TOOL_COUNT] = {
-	"JUG", "CRIMP", "SLOPER", "PINCH", "FOOT", "START", "TOP", "ERASE",
+	"JUG", "EDGE", "CRIMP", "POCKET", "SLOPER", "PINCH", "UNDERCLING", "VOLUME", "FOOT CHIP", "START", "TOP", "ERASE",
+};
+const char *const TOOL_SHORT[TOOL_COUNT] = {
+	"JUG", "EDGE", "CRMP", "PCKT", "SLPR", "PNCH", "UNDR", "VOL", "FOOT", "S", "TOP", "DEL",
+};
+const int8_t TOOL_HOLD[TOOL_COUNT] = {
+	HOLD_JUG, HOLD_EDGE, HOLD_CRIMP, HOLD_POCKET, HOLD_SLOPER, HOLD_PINCH, HOLD_UNDERCLING, HOLD_VOLUME, HOLD_FOOT,
+	-1, -1, -1,
 };
 
 /* Palette. */
@@ -138,9 +145,12 @@ static uint32_t route_color(const Route *r)
 	return ROUTE_COLOR[r->color % ROUTE_COLORS];
 }
 
-static int grade_of(const Route *r)
+void route_grade_label(char *out, int size, const Route *r)
 {
-	return route_grade(r);
+	if (r->grade == GRADE_UNKNOWN)
+		snprintf(out, size, "~V%d", route_grade(r));
+	else
+		grade_text(out, size, r->grade);
 }
 
 /* ------------------------------------------------------------------ */
@@ -149,49 +159,99 @@ static int grade_of(const Route *r)
 static const float ROT_COS[4] = { 1.0f, 0.7071f, 0.0f, -0.7071f };
 static const float ROT_SIN[4] = { 0.0f, 0.7071f, 1.0f, 0.7071f };
 
-/* Draw one hold centred at (x, y); `lift` is the extra stereo shift of the
- * hold itself over its shadow. */
-static void draw_hold_shape(Canvas *cv, float x, float y, int type, int rot, uint32_t col, float lift)
+/* Volumes: big triangular features with three lit faces. */
+static void draw_volume(Canvas *cv, float x, float y, float sx, float sy, int rot, uint32_t col, float k)
+{
+	float R = 17.0f * k;
+	float a0 = -1.5708f + rot * 1.5708f;
+	float vx[3], vy[3];
+	for (int i = 0; i < 3; i++) {
+		vx[i] = cosf(a0 + i * 2.0944f) * R;
+		vy[i] = sinf(a0 + i * 2.0944f) * R;
+	}
+	cv_tri(cv, sx + vx[0] + 1, sy + vy[0] + 1, sx + vx[1] + 1, sy + vy[1] + 1, sx + vx[2] + 1, sy + vy[2] + 1, 0x000000, 80);
+	uint32_t base = rgb_mix(col, 0x8A8F99, 90);
+	float apx = x - 1.5f * k, apy = y - 1.5f * k; /* the peak, nudged towards the light */
+	for (int i = 0; i < 3; i++) {
+		int n = (i + 1) % 3;
+		float mx = (vx[i] + vx[n]) * 0.5f, my = (vy[i] + vy[n]) * 0.5f, ml = sqrtf(mx * mx + my * my);
+		float lit = (mx * -0.6f + my * -0.8f) / (ml > 0 ? ml : 1); /* light from the top left */
+		uint32_t face = lit > 0 ? rgb_mix(base, 0xFFFFFF, (int)(lit * 80)) : rgb_mix(base, 0x000000, (int)(-lit * 90));
+		cv_tri(cv, apx, apy, x + vx[i], y + vy[i], x + vx[n], y + vy[n], face, 255);
+	}
+}
+
+/* Draw one hold centred at (x, y), scaled by k; `lift` is the extra stereo
+ * shift of the hold itself over its shadow. */
+static void draw_hold_shape(Canvas *cv, float x, float y, int type, int rot, uint32_t col, float lift, float k)
 {
 	float c = ROT_COS[rot & 3], s = ROT_SIN[rot & 3];
 	uint32_t dark = rgb_mix(col, 0x000000, 120);
 	uint32_t light = rgb_mix(col, 0xFFFFFF, 120);
-	float sx = x + 2, sy = y + 3; /* shadow on the wall */
+	float sx = x + 2 * k, sy = y + 3 * k; /* shadow on the wall */
 	x += lift;
 	switch (type) {
 	case HOLD_JUG:
-		cv_disc(cv, sx, sy, 8.5f, 0x000000, 70);
-		cv_disc(cv, x + c * 2.5f, y + s * 1.5f, 6.5f, col, 255);
-		cv_disc(cv, x - c * 2.0f, y - s * 1.0f, 7.5f, col, 255);
-		cv_capsule(cv, x - 4.5f, y - 2.5f, x + 4.5f, y - 2.5f, 2.2f, dark, 220); /* the incut lip */
-		cv_disc(cv, x - 3, y + 3, 2.2f, light, 110);
+		cv_disc(cv, sx, sy, 8.5f * k, 0x000000, 70);
+		cv_disc(cv, x + c * 2.5f * k, y + s * 1.5f * k, 6.5f * k, col, 255);
+		cv_disc(cv, x - c * 2.0f * k, y - s * 1.0f * k, 7.5f * k, col, 255);
+		cv_capsule(cv, x - 4.5f * k, y - 2.5f * k, x + 4.5f * k, y - 2.5f * k, 2.2f * k, dark, 220); /* the incut lip */
+		cv_disc(cv, x - 3 * k, y + 3 * k, 2.2f * k, light, 110);
+		break;
+	case HOLD_UNDERCLING:
+		/* A jug flipped over: the lip is underneath. */
+		cv_disc(cv, sx, sy, 8.0f * k, 0x000000, 70);
+		cv_disc(cv, x + c * 2.5f * k, y - s * 1.0f * k, 6.0f * k, col, 255);
+		cv_disc(cv, x - c * 2.0f * k, y + s * 0.5f * k, 7.0f * k, col, 255);
+		cv_capsule(cv, x - 4.5f * k, y + 3.0f * k, x + 4.5f * k, y + 3.0f * k, 2.2f * k, dark, 230);
+		cv_disc(cv, x - 3 * k, y - 3 * k, 2.2f * k, light, 120);
 		break;
 	case HOLD_CRIMP:
-		cv_capsule(cv, sx - c * 6, sy - s * 6, sx + c * 6, sy + s * 6, 3.4f, 0x000000, 70);
-		cv_capsule(cv, x - c * 6, y - s * 6, x + c * 6, y + s * 6, 3.0f, col, 255);
-		cv_capsule(cv, x - c * 5 + s, y - s * 5 - c, x + c * 5 + s, y + s * 5 - c, 1.0f, light, 150);
+		cv_capsule(cv, sx - c * 6 * k, sy - s * 6 * k, sx + c * 6 * k, sy + s * 6 * k, 3.4f * k, 0x000000, 70);
+		cv_capsule(cv, x - c * 6 * k, y - s * 6 * k, x + c * 6 * k, y + s * 6 * k, 3.0f * k, col, 255);
+		cv_capsule(cv, x - c * 5 * k + s, y - s * 5 * k - c, x + c * 5 * k + s, y + s * 5 * k - c, 1.0f * k, light, 150);
+		break;
+	case HOLD_EDGE:
+		/* A long, flat rail: deeper than a crimp. */
+		cv_capsule(cv, sx - c * 8 * k, sy - s * 8 * k, sx + c * 8 * k, sy + s * 8 * k, 4.4f * k, 0x000000, 70);
+		cv_capsule(cv, x - c * 8 * k, y - s * 8 * k, x + c * 8 * k, y + s * 8 * k, 4.0f * k, col, 255);
+		cv_capsule(cv, x - c * 7 * k + s * 2, y - s * 7 * k - c * 2, x + c * 7 * k + s * 2, y + s * 7 * k - c * 2,
+		           1.3f * k, light, 160);
+		cv_capsule(cv, x - c * 7 * k - s * 2, y - s * 7 * k + c * 2, x + c * 7 * k - s * 2, y + s * 7 * k + c * 2,
+		           1.0f * k, dark, 120);
 		break;
 	case HOLD_SLOPER:
-		cv_disc(cv, sx, sy, 11.5f, 0x000000, 70);
-		cv_disc(cv, x, y, 11.0f, rgb_mix(col, 0x000000, 40), 255);
-		cv_disc(cv, x - 1.5f, y - 1.5f, 8.0f, col, 255);
-		cv_disc(cv, x - 3.5f, y - 3.5f, 3.5f, light, 120);
+		cv_disc(cv, sx, sy, 11.5f * k, 0x000000, 70);
+		cv_disc(cv, x, y, 11.0f * k, rgb_mix(col, 0x000000, 40), 255);
+		cv_disc(cv, x - 1.5f * k, y - 1.5f * k, 8.0f * k, col, 255);
+		cv_disc(cv, x - 3.5f * k, y - 3.5f * k, 3.5f * k, light, 120);
+		break;
+	case HOLD_POCKET:
+		/* A round hold with a two-finger hole in it. */
+		cv_disc(cv, sx, sy, 7.5f * k, 0x000000, 70);
+		cv_disc(cv, x, y, 7.0f * k, col, 255);
+		cv_disc(cv, x - 2 * k, y - 2.5f * k, 2.0f * k, light, 110);
+		cv_disc(cv, x + 0.5f * k, y + 0.5f * k, 3.0f * k, 0x101014, 230);
+		cv_ring(cv, x + 0.5f * k, y + 0.5f * k, 3.4f * k, 1.0f, dark, 200);
 		break;
 	case HOLD_PINCH: {
 		/* Pinches stand across the crimp direction. */
 		float pc = -s, ps = c;
-		cv_capsule(cv, sx - pc * 7, sy - ps * 7, sx + pc * 7, sy + ps * 7, 4.4f, 0x000000, 70);
-		cv_capsule(cv, x - pc * 7, y - ps * 7, x + pc * 7, y + ps * 7, 4.0f, col, 255);
-		cv_capsule(cv, x - pc * 6 - 1.2f, y - ps * 6 - 1.2f, x + pc * 4 - 1.2f, y + ps * 4 - 1.2f, 1.3f, light, 130);
+		cv_capsule(cv, sx - pc * 7 * k, sy - ps * 7 * k, sx + pc * 7 * k, sy + ps * 7 * k, 4.4f * k, 0x000000, 70);
+		cv_capsule(cv, x - pc * 7 * k, y - ps * 7 * k, x + pc * 7 * k, y + ps * 7 * k, 4.0f * k, col, 255);
+		cv_capsule(cv, x - (pc * 6 + 1.2f) * k, y - (ps * 6 + 1.2f) * k, x + (pc * 4 - 1.2f) * k, y + (ps * 4 - 1.2f) * k,
+		           1.3f * k, light, 130);
 		break;
 	}
+	case HOLD_VOLUME:
+		draw_volume(cv, x, y, sx, sy, rot, col, k);
+		break;
 	default: /* HOLD_FOOT */
-		cv_disc(cv, sx - 1, sy - 1, 4.3f, 0x000000, 70);
-		cv_disc(cv, x, y, 4.0f, col, 255);
-		cv_disc(cv, x - 1.3f, y - 1.3f, 1.5f, light, 130);
+		cv_disc(cv, sx - 1, sy - 1, 4.3f * k, 0x000000, 70);
+		cv_disc(cv, x, y, 4.0f * k, col, 255);
+		cv_disc(cv, x - 1.3f * k, y - 1.3f * k, 1.5f * k, light, 130);
 		break;
 	}
-	(void)dark;
 }
 
 static void draw_tag(Canvas *cv, float x, float y, const char *label)
@@ -209,18 +269,46 @@ static void draw_holds(Canvas *cv, const Route *r, float ox, float oy, float lif
 	uint32_t col = route_color(r);
 	int saveH = cv->h;
 	cv->h = clipH;
-	for (int i = 0; i < r->nholds; i++) {
-		const Hold *h = &r->holds[i];
-		float x = h->x + ox, y = h->y + oy;
-		if (y < -20 || y > clipH + 20 || x < -20 || x > cv->w + 20)
+	/* Volumes first: other holds can be bolted on top of them. */
+	for (int pass = 0; pass < 2; pass++)
+		for (int i = 0; i < r->nholds; i++) {
+			const Hold *h = &r->holds[i];
+			if ((h->type == HOLD_VOLUME) != (pass == 0))
+				continue;
+			float x = h->x + ox, y = h->y + oy;
+			if (y < -24 || y > clipH + 24 || x < -24 || x > cv->w + 24)
+				continue;
+			draw_hold_shape(cv, x, y, h->type, h->rot, col, lift, 1.0f);
+			if (h->role == ROLE_START)
+				draw_tag(cv, x + lift, y, "S");
+			else if (h->role == ROLE_FINISH)
+				draw_tag(cv, x + lift, y, "TOP");
+			if (i == highlight)
+				cv_ring(cv, x + lift, y, HOLD_INFO[h->type].grab + 3, 1.6f, 0xFFFFFF, 200);
+		}
+	cv->h = saveH;
+}
+
+/* Numbered beta moves next to their holds: hands white, feet grey, moves
+ * already made dimmed. Offsets keep the four limbs' numbers apart. */
+static void draw_beta(Canvas *cv, const Route *r, float ox, float oy, float lift, int clipH, int done)
+{
+	static const float DX[LIMBS] = { -10, 10, -10, 10 }, DY[LIMBS] = { -10, -10, 10, 10 };
+	int saveH = cv->h;
+	cv->h = clipH;
+	for (int i = 0; i < r->nbeta; i++) {
+		const BetaMove *m = &r->beta[i];
+		const Hold *h = &r->holds[m->hold];
+		float x = h->x + ox + lift + DX[m->limb], y = h->y + oy + DY[m->limb];
+		if (y < -8 || y > clipH + 8)
 			continue;
-		draw_hold_shape(cv, x, y, h->type, h->rot, col, lift);
-		if (h->role == ROLE_START)
-			draw_tag(cv, x + lift, y, "S");
-		else if (h->role == ROLE_FINISH)
-			draw_tag(cv, x + lift, y, "TOP");
-		if (i == highlight)
-			cv_ring(cv, x + lift, y, HOLD_INFO[h->type].grab + 3, 1.6f, 0xFFFFFF, 200);
+		bool hand = m->limb <= LIMB_RH;
+		int a = i < done ? 90 : 235;
+		bool next = i == done;
+		cv_disc(cv, x, y, next ? 7.5f : 6.0f, next ? C_ACCENT : hand ? 0xFFFFFF : 0xB8BCC6, a);
+		char n[12];
+		snprintf(n, sizeof(n), "%d", i + 1);
+		cv_text(cv, &FONT_SMALL, (int)x, (int)y - 3, n, 0x15161A, a, 0, ALIGN_CENTER);
 	}
 	cv->h = saveH;
 }
@@ -398,22 +486,33 @@ static void top_climb(Canvas *cv, const UiState *ui, float depth)
 	int hud = (int)lroundf(depth * 1.6f);
 	draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
 	draw_holds(cv, r, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, -1);
+	if (ui->showBeta || ui->watching)
+		draw_beta(cv, r, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, ui->watching ? ui->betaStep : 0);
 	draw_reach(cv, c, TOP_WALL_X + depth, -worldTop, ui->frame);
 	draw_climber(cv, c, TOP_WALL_X + depth, -worldTop, false);
 
 	char right[32], t[16];
 	format_time(t, sizeof(t), c->frames);
-	snprintf(right, sizeof(right), "%s   %d MOVES", t, c->moves);
+	if (ui->watching)
+		snprintf(right, sizeof(right), "BETA %d / %d", ui->betaStep < r->nbeta ? ui->betaStep + 1 : r->nbeta, r->nbeta);
+	else
+		snprintf(right, sizeof(right), "%s   %d MOVES", t, c->moves);
 	top_header(cv, r->name, right, route_color(r), hud);
+	if (ui->watching && ui->betaText && c->state == CL_CLIMBING)
+		text_shadow(cv, &FONT_MED, TOP_W / 2 + hud, 30, ui->betaText, C_ACCENT, 255, 1, ALIGN_CENTER);
 	stamina_bar(cv, c, hud, ui->frame);
 	draw_route_strip(cv, 368 + hud, 26, 24, 200, r, ui->camY, c);
 
-	if (c->note && c->state == CL_CLIMBING) {
+	if (c->note && c->state == CL_CLIMBING && !ui->watching) {
 		int a = c->noteTimer > 20 ? 255 : c->noteTimer * 12;
 		const Font *f = text_width(&FONT_BIG, c->note, 1) < WALL_W - 16 ? &FONT_BIG : &FONT_MED;
 		text_shadow(cv, f, TOP_W / 2 + hud, 40, c->note, C_TEXT, a, 1, ALIGN_CENTER);
 	}
-	if (c->state == CL_TOPPED) {
+	if (c->state == CL_TOPPED && ui->watching) {
+		char sub[48];
+		snprintf(sub, sizeof(sub), "%d MOVES TO THE TOP", r->nbeta);
+		big_banner(cv, "THAT'S THE BETA", sub, "A: WATCH AGAIN   B: BACK", C_ACCENT, hud);
+	} else if (c->state == CL_TOPPED) {
 		char sub[48];
 		format_time(t, sizeof(t), c->frames);
 		snprintf(sub, sizeof(sub), "%s  -  %d MOVES%s", t, c->moves, ui->newBest ? "  -  NEW BEST!" : "");
@@ -433,8 +532,9 @@ static void top_edit(Canvas *cv, const UiState *ui, float depth)
 	draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
 	draw_holds(cv, r, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, ui->activeHold);
 
-	char right[40];
-	snprintf(right, sizeof(right), "V%d  %s", grade_of(r), ANGLE_NAMES[r->angle]);
+	char right[40], g[8];
+	route_grade_label(g, sizeof(g), r);
+	snprintf(right, sizeof(right), "%s  %s", g, ANGLE_NAMES[r->angle]);
 	top_header(cv, r->name, right, route_color(r), hud);
 	draw_route_strip(cv, 368 + hud, 26, 24, 200, r, ui->camY, NULL);
 
@@ -444,12 +544,14 @@ static void top_edit(Canvas *cv, const UiState *ui, float depth)
 	cv_text(cv, &FONT_SMALL, 20 + hud, 28, "HOLDS", C_DIM, 255, 0, ALIGN_CENTER);
 	cv_text(cv, &FONT_MED, 20 + hud, 40, n, C_TEXT, 255, 0, ALIGN_CENTER);
 	cv_text(cv, &FONT_SMALL, 20 + hud, 70, "TOOL", C_DIM, 255, 0, ALIGN_CENTER);
-	if (ui->tool < HOLD_TYPES)
-		draw_hold_shape(cv, 20 + hud, 94, ui->tool, 0, route_color(r), 0);
+	int ht = TOOL_HOLD[ui->tool];
+	if (ht >= 0)
+		draw_hold_shape(cv, 20 + hud, 94, ht, 0, route_color(r), 0, ht == HOLD_VOLUME ? 0.55f : 0.8f);
 	else
 		cv_text(cv, &FONT_MED, 20 + hud, 88, ui->tool == TOOL_START ? "S" : ui->tool == TOOL_TOP ? "T" : "X",
 		        C_TEXT, 255, 0, ALIGN_CENTER);
-	cv_text(cv, &FONT_SMALL, 20 + hud, 114, TOOL_NAMES[ui->tool], C_TEXT, 255, 0, ALIGN_CENTER);
+	cv_text(cv, &FONT_SMALL, 20 + hud, 114, TOOL_SHORT[ui->tool], C_TEXT, 255, 0, ALIGN_CENTER);
+
 
 	/* Controls, bottom of the wall area. */
 	cv_blend(cv, TOP_WALL_X, TOP_H - 30, WALL_W, 30, 0x000000, 150);
@@ -478,57 +580,99 @@ static void draw_minimap(Canvas *cv, int x, int y, const Route *r)
 	cv_frame(cv, x - 1, y, w + 2, h, 0x000000, 160);
 }
 
+static void tips(Canvas *cv, const char *title, const char *const *lines, int n, int bright)
+{
+	text_shadow(cv, &FONT_BIG, TOP_W / 2, 44, title, C_ACCENT, 255, 1, ALIGN_CENTER);
+	for (int i = 0; i < n; i++)
+		cv_text(cv, &FONT_SMALL, TOP_W / 2, 84 + i * 16, lines[i], i < bright ? C_TEXT : C_DIM, 255, 0, ALIGN_CENTER);
+}
+
 static void top_list(Canvas *cv, const UiState *ui)
 {
 	const RouteBook *b = ui->book;
-	if (ui->listSel == 0 || ui->listSel > b->count) {
-		text_shadow(cv, &FONT_BIG, TOP_W / 2, 50, "SET A NEW ROUTE", C_ACCENT, 255, 1, ALIGN_CENTER);
-		static const char *TIPS[] = {
+	char line[48], t[16];
+	if (ui->listSel == LIST_GENERATE) {
+		static const char *const L[] = {
+			"PICK A GRADE AND A WALL, AND A ROUTE IS SET FOR YOU.",
+			"EVERY ONE IS TEST-CLIMBED BY THE BETA FINDER,",
+			"SO IT CAN BE DONE - AND IT KNOWS HOW.",
+			"",
+			"OPEN IT IN THE EDITOR TO TWEAK IT, WATCH THE BETA",
+			"OR TRY IT YOURSELF, THEN SAVE IT TO YOUR BOOK.",
+		};
+		tips(cv, "GENERATE A ROUTE", L, 6, 3);
+	} else if (ui->listSel < LIST_FIRST || ui->listSel - LIST_FIRST >= b->count) {
+		static const char *const L[] = {
 			"PICK A HOLD TYPE ON THE TOOLBAR, THEN TAP THE WALL.",
 			"MARK ONE OR TWO START HOLDS (S) NEAR THE MAT",
-			"AND ONE TOP HOLD (T). MATCH BOTH HANDS ON IT TO SEND.",
+			"AND ONE TOP HOLD (TOP). MATCH BOTH HANDS ON IT TO SEND.",
+			"SAVING WORKS OUT THE GRADE AND THE BEST WAY UP.",
 			"",
-			"JUGS ARE EASY. CRIMPS AND SLOPERS PUMP YOU OUT.",
-			"FOOT CHIPS ARE ONLY GOOD FOR FEET.",
-			"STEEPER WALLS PUT MORE WEIGHT ON YOUR HANDS.",
+			"JUGS AND EDGES ARE KIND. CRIMPS, POCKETS AND SLOPERS",
+			"PUMP YOU OUT. UNDERCLINGS ARE GOOD ONCE YOU'RE ABOVE",
+			"THEM. FOOT CHIPS AND VOLUMES ARE FOR YOUR FEET.",
 		};
-		for (int i = 0; i < 7; i++)
-			cv_text(cv, &FONT_SMALL, TOP_W / 2, 92 + i * 16, TIPS[i], i < 3 ? C_TEXT : C_DIM, 255, 0, ALIGN_CENTER);
-		char n[32];
-		snprintf(n, sizeof(n), "%d / %d ROUTES SAVED", b->count, MAX_ROUTES);
-		cv_text(cv, &FONT_SMALL, TOP_W / 2, 214, n, C_DIM, 255, 1, ALIGN_CENTER);
+		tips(cv, "SET A NEW ROUTE", L, 8, 4);
+	} else {
+		const Route *r = &b->routes[ui->listSel - LIST_FIRST];
+		draw_minimap(cv, 20, 0, r);
+		int x = 150;
+		uint32_t col = route_color(r);
+		text_shadow(cv, &FONT_BIG, x, 18, r->name, C_TEXT, 255, 1, ALIGN_LEFT);
+		cv_fill(cv, x, 46, 230, 2, col);
+		char g[8];
+		route_grade_label(g, sizeof(g), r);
+		text_shadow(cv, &FONT_HUGE, x, 62, g, col == 0x2B2B33 ? C_TEXT : col, 255, 2, ALIGN_LEFT);
+		int gx = x + text_width(&FONT_HUGE, g, 2) + 10;
+		if (r->grade == GRADE_NONE) {
+			cv_text(cv, &FONT_SMALL, gx, 66, "NO WAY UP", C_WARN, 255, 1, ALIGN_LEFT);
+			cv_text(cv, &FONT_SMALL, gx, 82, "FOUND", C_WARN, 255, 1, ALIGN_LEFT);
+		} else if (r->grade == GRADE_UNKNOWN) {
+			cv_text(cv, &FONT_SMALL, gx, 66, "NOT GRADED", C_DIM, 255, 1, ALIGN_LEFT);
+			cv_text(cv, &FONT_SMALL, gx, 82, "YET", C_DIM, 255, 1, ALIGN_LEFT);
+		} else {
+			snprintf(line, sizeof(line), "BETA: %d MOVES", r->nbeta);
+			cv_text(cv, &FONT_SMALL, gx, 66, line, C_TEXT, 255, 1, ALIGN_LEFT);
+			cv_text(cv, &FONT_SMALL, gx, 82, "SELECT: WATCH IT", C_DIM, 255, 1, ALIGN_LEFT);
+		}
+
+		int y = 116;
+		snprintf(line, sizeof(line), "%s WALL", ANGLE_NAMES[r->angle]);
+		cv_text(cv, &FONT_MED, x, y, line, C_TEXT, 255, 1, ALIGN_LEFT);
+		snprintf(line, sizeof(line), "%s HOLDS  -  %d IN TOTAL", COLOR_NAMES[r->color % ROUTE_COLORS], r->nholds);
+		cv_text(cv, &FONT_SMALL, x, y + 22, line, C_DIM, 255, 1, ALIGN_LEFT);
+		if (r->bestFrames) {
+			format_time(t, sizeof(t), r->bestFrames);
+			snprintf(line, sizeof(line), "BEST %s", t);
+			cv_text(cv, &FONT_MED, x, y + 50, line, C_GOLD, 255, 1, ALIGN_LEFT);
+		} else {
+			cv_text(cv, &FONT_MED, x, y + 50, "NOT SENT YET", C_DIM, 255, 1, ALIGN_LEFT);
+		}
+		snprintf(line, sizeof(line), "%d SENDS  /  %d ATTEMPTS", r->sends, r->attempts);
+		cv_text(cv, &FONT_SMALL, x, y + 72, line, C_DIM, 255, 1, ALIGN_LEFT);
+		const char *p = route_problem(r);
+		if (p)
+			cv_text(cv, &FONT_SMALL, x, y + 94, p, C_WARN, 255, 1, ALIGN_LEFT);
 		return;
 	}
-	const Route *r = &b->routes[ui->listSel - 1];
-	draw_minimap(cv, 20, 0, r);
-	int x = 150;
-	uint32_t col = route_color(r);
-	text_shadow(cv, &FONT_BIG, x, 18, r->name, C_TEXT, 255, 1, ALIGN_LEFT);
-	cv_fill(cv, x, 46, 230, 2, col);
-	char g[8];
-	snprintf(g, sizeof(g), "V%d", grade_of(r));
-	text_shadow(cv, &FONT_HUGE, x, 62, g, col == 0x2B2B33 ? C_TEXT : col, 255, 2, ALIGN_LEFT);
-	cv_text(cv, &FONT_SMALL, x + text_width(&FONT_HUGE, g, 2) + 10, 66, "ESTIMATED", C_DIM, 255, 1, ALIGN_LEFT);
-	cv_text(cv, &FONT_SMALL, x + text_width(&FONT_HUGE, g, 2) + 10, 82, "GRADE", C_DIM, 255, 1, ALIGN_LEFT);
+	snprintf(line, sizeof(line), "%d / %d ROUTES SAVED", b->count, MAX_ROUTES);
+	cv_text(cv, &FONT_SMALL, TOP_W / 2, 214, line, C_DIM, 255, 1, ALIGN_CENTER);
+}
 
-	char line[48], t[16];
-	int y = 116;
-	snprintf(line, sizeof(line), "%s WALL", ANGLE_NAMES[r->angle]);
-	cv_text(cv, &FONT_MED, x, y, line, C_TEXT, 255, 1, ALIGN_LEFT);
-	snprintf(line, sizeof(line), "%s HOLDS  -  %d IN TOTAL", COLOR_NAMES[r->color % ROUTE_COLORS], r->nholds);
-	cv_text(cv, &FONT_SMALL, x, y + 22, line, C_DIM, 255, 1, ALIGN_LEFT);
-	if (r->bestFrames) {
-		format_time(t, sizeof(t), r->bestFrames);
-		snprintf(line, sizeof(line), "BEST %s", t);
-		cv_text(cv, &FONT_MED, x, y + 50, line, C_GOLD, 255, 1, ALIGN_LEFT);
-	} else {
-		cv_text(cv, &FONT_MED, x, y + 50, "NOT SENT YET", C_DIM, 255, 1, ALIGN_LEFT);
+/* Solver or generator at work: its climber on the wall, with progress. */
+static void top_working(Canvas *cv, const UiState *ui, float depth)
+{
+	if (ui->route && ui->climber) {
+		float worldTop = ui->camY - TOP_H;
+		draw_wall(cv, TOP_WALL_X, 0, TOP_H, worldTop);
+		draw_holds(cv, ui->route, TOP_WALL_X, -worldTop, depth * 0.5f, TOP_H, -1);
+		draw_climber(cv, ui->climber, TOP_WALL_X + depth, -worldTop, false);
 	}
-	snprintf(line, sizeof(line), "%d SENDS  /  %d ATTEMPTS", r->sends, r->attempts);
-	cv_text(cv, &FONT_SMALL, x, y + 72, line, C_DIM, 255, 1, ALIGN_LEFT);
-	const char *p = route_problem(r);
-	if (p)
-		cv_text(cv, &FONT_SMALL, x, y + 94, p, C_WARN, 255, 1, ALIGN_LEFT);
+	int hud = (int)lroundf(depth * 1.6f);
+	top_header(cv, ui->workTitle ? ui->workTitle : "", ui->workSub ? ui->workSub : "", C_ACCENT, hud);
+	int w = 260, x = (TOP_W - w) / 2 + hud, y = TOP_H - 22;
+	panel(cv, x - 3, y - 3, w + 6, 12, 0x000000, 170);
+	cv_fill(cv, x, y, (int)(w * ui->workProgress), 6, C_ACCENT);
 }
 
 static void top_title(Canvas *cv, const UiState *ui, float depth)
@@ -559,6 +703,7 @@ void render_top(Canvas *cv, const UiState *ui, float depth)
 	case SCR_LIST:  top_list(cv, ui); break;
 	case SCR_EDIT:  top_edit(cv, ui, depth); break;
 	case SCR_CLIMB: top_climb(cv, ui, depth); break;
+	case SCR_WORKING: top_working(cv, ui, depth); break;
 	}
 }
 
@@ -621,79 +766,93 @@ static void bottom_list(Canvas *cv, const UiState *ui)
 	snprintf(n, sizeof(n), "%d/%d", b->count, MAX_ROUTES);
 	cv_text(cv, &FONT_SMALL, BOT_W - 12, 12, n, C_DIM, 255, 1, ALIGN_RIGHT);
 
+	bool full = b->count >= MAX_ROUTES;
+	int rows = LIST_FIRST + b->count;
 	for (int row = 0; row < LIST_ROWS; row++) {
 		int i = ui->listScroll + row;
-		if (i > b->count)
+		if (i >= rows)
 			break;
 		int y = LIST_Y + row * LIST_ROW_H;
 		bool sel = i == ui->listSel;
 		panel(cv, 8, y, BOT_W - 16, LIST_ROW_H - 4, sel ? C_PANEL_HI : C_PANEL, 255);
 		if (sel)
 			cv_fill(cv, 8, y, 3, LIST_ROW_H - 4, C_ACCENT);
-		if (i == 0) {
-			bool full = b->count >= MAX_ROUTES;
-			cv_text(cv, &FONT_MED, 22, y + 6, full ? "ROUTE BOOK FULL" : "+  NEW ROUTE", full ? C_DIM : C_ACCENT, 255, 1, ALIGN_LEFT);
+		if (i == LIST_NEW || i == LIST_GENERATE) {
+			const char *label = full ? "ROUTE BOOK FULL" : i == LIST_NEW ? "+  NEW ROUTE" : "*  GENERATE A ROUTE";
+			if (full && i == LIST_GENERATE)
+				label = "*  GENERATE (BOOK FULL)";
+			cv_text(cv, &FONT_MED, 22, y + 6, label, full && i == LIST_NEW ? C_DIM : C_ACCENT, 255, 1, ALIGN_LEFT);
 			continue;
 		}
-		const Route *r = &b->routes[i - 1];
+		const Route *r = &b->routes[i - LIST_FIRST];
 		cv_disc(cv, 24, y + 12, 5, route_color(r), 255);
 		cv_ring(cv, 24, y + 12, 5.5f, 1, 0x000000, 120);
 		cv_text(cv, &FONT_MED, 36, y + 6, r->name, C_TEXT, 255, 1, ALIGN_LEFT);
-		char info[24];
-		snprintf(info, sizeof(info), "V%d", grade_of(r));
-		cv_text(cv, &FONT_MED, BOT_W - 52, y + 6, info, C_TEXT, 255, 1, ALIGN_RIGHT);
+		char g[8];
+		route_grade_label(g, sizeof(g), r);
+		cv_text(cv, &FONT_MED, BOT_W - 52, y + 6, g, C_TEXT, 255, 1, ALIGN_RIGHT);
 		if (r->sends)
 			cv_text(cv, &FONT_SMALL, BOT_W - 18, y + 8, "SENT", C_GOLD, 255, 0, ALIGN_RIGHT);
 	}
 	/* Scroll hints. */
 	if (ui->listScroll > 0)
 		cv_text(cv, &FONT_SMALL, BOT_W / 2, LIST_Y - 9, "^", C_DIM, 255, 0, ALIGN_CENTER);
-	if (ui->listScroll + LIST_ROWS <= b->count)
+	if (ui->listScroll + LIST_ROWS < rows)
 		cv_text(cv, &FONT_SMALL, BOT_W / 2, LIST_Y + LIST_ROWS * LIST_ROW_H - 3, "v", C_DIM, 255, 0, ALIGN_CENTER);
 
-	bool isNew = ui->listSel == 0;
-	bool canNew = b->count < MAX_ROUTES;
-	static const char *LABELS[LBTN_COUNT] = { "BACK", "DELETE", "EDIT", "CLIMB" };
+	bool route = ui->listSel >= LIST_FIRST;
+	bool solved = route && b->routes[ui->listSel - LIST_FIRST].nbeta > 0;
+	static const char *LABELS[LBTN_COUNT] = { "BACK", "DELETE", "EDIT", "BETA", "CLIMB" };
+	static const char *KEYS[LBTN_COUNT] = { "B", "Y", "X", "SELECT", "A" };
 	for (int k = 0; k < LBTN_COUNT; k++) {
-		int x = 6 + k * 78;
+		int x = 2 + k * LIST_BTN_STEP;
 		const char *label = LABELS[k];
+		const char *key = KEYS[k];
 		bool enabled = true, on = false;
-		if (k == LBTN_DELETE) {
-			enabled = !isNew;
+		switch (k) {
+		case LBTN_DELETE:
+			enabled = route;
 			if (ui->confirmDelete) {
 				label = "SURE?";
 				on = true;
 			}
+			break;
+		case LBTN_EDIT:
+			if (ui->listSel == LIST_NEW) label = "CREATE";
+			if (ui->listSel == LIST_GENERATE) label = "SET IT";
+			if (!route) {
+				enabled = !full || ui->listSel == LIST_GENERATE;
+				key = "A";
+			}
+			break;
+		case LBTN_BETA:
+			enabled = route && (solved || b->routes[ui->listSel - LIST_FIRST].grade == GRADE_UNKNOWN);
+			break;
+		case LBTN_CLIMB:
+			enabled = route;
+			break;
 		}
-		if (k == LBTN_EDIT && isNew) {
-			label = "CREATE";
-			enabled = canNew;
-		}
-		if (k == LBTN_CLIMB)
-			enabled = !isNew;
-		button(cv, x, LIST_BTN_Y, 74, LIST_BTN_H, label, on, enabled);
+		button(cv, x, LIST_BTN_Y, LIST_BTN_W, LIST_BTN_H, label, on, enabled);
+		cv_text(cv, &FONT_SMALL, x + LIST_BTN_W / 2, LIST_BTN_Y + 36, key, C_DIM, 255, 0, ALIGN_CENTER);
 	}
-	cv_text(cv, &FONT_SMALL, 6 + 0 * 78 + 37, LIST_BTN_Y + 36, "B", C_DIM, 255, 0, ALIGN_CENTER);
-	cv_text(cv, &FONT_SMALL, 6 + 1 * 78 + 37, LIST_BTN_Y + 36, "Y", C_DIM, 255, 0, ALIGN_CENTER);
-	cv_text(cv, &FONT_SMALL, 6 + 2 * 78 + 37, LIST_BTN_Y + 36, "X", C_DIM, 255, 0, ALIGN_CENTER);
-	cv_text(cv, &FONT_SMALL, 6 + 3 * 78 + 37, LIST_BTN_Y + 36, "A", C_DIM, 255, 0, ALIGN_CENTER);
 }
 
 static void tool_icon(Canvas *cv, int t, int cx, int cy, uint32_t col)
 {
-	if (t < HOLD_TYPES) {
-		draw_hold_shape(cv, cx, cy, t, 0, col, 0);
+	int ht = TOOL_HOLD[t];
+	if (ht >= 0) {
+		draw_hold_shape(cv, cx, cy, ht, 0, col, 0, ht == HOLD_VOLUME ? 0.55f : ht == HOLD_SLOPER ? 0.8f : 0.9f);
 		return;
 	}
 	if (t == TOOL_START || t == TOOL_TOP) {
 		const char *l = t == TOOL_START ? "S" : "TOP";
-		int w = text_width(&FONT_SMALL, l, 0) + 8;
+		int w = text_width(&FONT_SMALL, l, 0) + 6;
 		panel(cv, cx - w / 2, cy - 7, w, 14, 0xFFFFFF, 240);
 		cv_text(cv, &FONT_SMALL, cx, cy - 3, l, 0x15161A, 255, 0, ALIGN_CENTER);
 		return;
 	}
-	cv_capsule(cv, cx - 6, cy - 6, cx + 6, cy + 6, 1.8f, C_WARN, 255);
-	cv_capsule(cv, cx - 6, cy + 6, cx + 6, cy - 6, 1.8f, C_WARN, 255);
+	cv_capsule(cv, cx - 5, cy - 5, cx + 5, cy + 5, 1.8f, C_WARN, 255);
+	cv_capsule(cv, cx - 5, cy + 5, cx + 5, cy - 5, 1.8f, C_WARN, 255);
 }
 
 static void bottom_edit(Canvas *cv, const UiState *ui)
@@ -711,13 +870,12 @@ static void bottom_edit(Canvas *cv, const UiState *ui)
 	cv_fill(cv, 0, EDIT_VIEW_H, BOT_W, BOT_H - EDIT_VIEW_H, C_PANEL);
 	cv_fill(cv, 0, EDIT_VIEW_H, BOT_W, 1, 0x000000);
 	for (int t = 0; t < TOOL_COUNT; t++) {
-		int x = t * TOOL_W;
+		int x = TOOL_X0 + t * TOOL_W;
 		if (t == ui->tool) {
-			panel(cv, x + 2, EDIT_VIEW_H + 3, TOOL_W - 4, BOT_H - EDIT_VIEW_H - 5, C_PANEL_HI, 255);
-			cv_fill(cv, x + 6, BOT_H - 4, TOOL_W - 12, 2, C_ACCENT);
+			panel(cv, x + 1, EDIT_VIEW_H + 3, TOOL_W - 2, BOT_H - EDIT_VIEW_H - 5, C_PANEL_HI, 255);
+			cv_fill(cv, x + 4, BOT_H - 4, TOOL_W - 8, 2, C_ACCENT);
 		}
-		tool_icon(cv, t, x + TOOL_W / 2, EDIT_VIEW_H + 16, route_color(r));
-		cv_text(cv, &FONT_SMALL, x + TOOL_W / 2, BOT_H - 13, TOOL_NAMES[t], t == ui->tool ? C_TEXT : C_DIM, 255, 0, ALIGN_CENTER);
+		tool_icon(cv, t, x + TOOL_W / 2, EDIT_VIEW_H + 19, route_color(r));
 	}
 }
 
@@ -726,12 +884,37 @@ static void bottom_climb(Canvas *cv, const UiState *ui)
 	const Climber *c = ui->climber;
 	draw_wall(cv, 0, 0, BOT_H, ui->camY);
 	draw_holds(cv, ui->route, 0, -ui->camY, 0, BOT_H, -1);
+	if (ui->showBeta || ui->watching)
+		draw_beta(cv, ui->route, 0, -ui->camY, 0, BOT_H, ui->watching ? ui->betaStep : 0);
 	draw_reach(cv, c, 0, -ui->camY, ui->frame);
-	draw_climber(cv, c, 0, -ui->camY, true);
-	if (c->state == CL_CLIMBING && c->moves == 0 && c->moving < 0) {
+	draw_climber(cv, c, 0, -ui->camY, !ui->watching);
+	const char *hint = NULL;
+	if (ui->watching)
+		hint = "WATCHING THE BETA   -   B: STOP";
+	else if (c->state == CL_CLIMBING && c->moves == 0 && c->moving < 0)
+		hint = ui->route->nbeta ? "DRAG A LIMB OR HOLD L/R/Y/A   -   SELECT: SHOW BETA"
+		                        : "DRAG A HAND OR FOOT - OR HOLD L/R/Y/A + CIRCLE PAD";
+	if (hint) {
 		cv_blend(cv, 0, BOT_H - 22, BOT_W, 22, 0x000000, 150);
-		cv_text(cv, &FONT_SMALL, BOT_W / 2, BOT_H - 15, "DRAG A HAND OR FOOT - OR HOLD L/R/Y/A + CIRCLE PAD", C_TEXT, 255, 0, ALIGN_CENTER);
+		cv_text(cv, &FONT_SMALL, BOT_W / 2, BOT_H - 15, hint, C_TEXT, 255, 0, ALIGN_CENTER);
 	}
+}
+
+static void bottom_working(Canvas *cv, const UiState *ui)
+{
+	cv_vgradient(cv, 0, 0, BOT_W, BOT_H, C_BG_TOP, C_BG_BOT);
+	text_shadow(cv, &FONT_BIG, BOT_W / 2, 70, ui->workTitle ? ui->workTitle : "", C_TEXT, 255, 1, ALIGN_CENTER);
+	if (ui->workSub)
+		cv_text(cv, &FONT_SMALL, BOT_W / 2, 104, ui->workSub, C_DIM, 255, 1, ALIGN_CENTER);
+	int w = 240, x = (BOT_W - w) / 2, y = 130;
+	panel(cv, x - 3, y - 3, w + 6, 16, 0x000000, 170);
+	cv_fill(cv, x, y, (int)(w * ui->workProgress), 10, C_ACCENT);
+	/* A little bouncing chalk dust while we wait. */
+	for (int i = 0; i < 5; i++) {
+		float t = ui->frame * 0.12f + i * 1.2f;
+		cv_disc(cv, BOT_W / 2 - 40 + i * 20, 170 - fabsf(sinf(t)) * 10, 3, CHALK, 200);
+	}
+	cv_text(cv, &FONT_SMALL, BOT_W / 2, 214, "B: CANCEL", C_DIM, 255, 1, ALIGN_CENTER);
 }
 
 void render_bottom(Canvas *cv, const UiState *ui)
@@ -740,10 +923,11 @@ void render_bottom(Canvas *cv, const UiState *ui)
 	case SCR_LOADING:
 		cv_vgradient(cv, 0, 0, BOT_W, BOT_H, C_BG_TOP, C_BG_BOT);
 		break;
-	case SCR_TITLE: bottom_title(cv, ui); break;
-	case SCR_LIST:  bottom_list(cv, ui); break;
-	case SCR_EDIT:  bottom_edit(cv, ui); break;
-	case SCR_CLIMB: bottom_climb(cv, ui); break;
+	case SCR_TITLE:   bottom_title(cv, ui); break;
+	case SCR_LIST:    bottom_list(cv, ui); break;
+	case SCR_EDIT:    bottom_edit(cv, ui); break;
+	case SCR_CLIMB:   bottom_climb(cv, ui); break;
+	case SCR_WORKING: bottom_working(cv, ui); break;
 	}
 	toast(cv, ui);
 	popup_menu(cv, ui);
@@ -757,7 +941,7 @@ int hit_list_row(const UiState *ui, int px, int py)
 	if (px < 8 || px >= BOT_W - 8 || py < LIST_Y || py >= LIST_Y + LIST_ROWS * LIST_ROW_H)
 		return -1;
 	int i = ui->listScroll + (py - LIST_Y) / LIST_ROW_H;
-	return i <= ui->book->count ? i : -1;
+	return i < LIST_FIRST + ui->book->count ? i : -1;
 }
 
 int hit_list_button(int px, int py)
@@ -765,8 +949,8 @@ int hit_list_button(int px, int py)
 	if (py < LIST_BTN_Y || py >= LIST_BTN_Y + LIST_BTN_H)
 		return -1;
 	for (int k = 0; k < LBTN_COUNT; k++) {
-		int x = 6 + k * 78;
-		if (px >= x && px < x + 74)
+		int x = 2 + k * LIST_BTN_STEP;
+		if (px >= x && px < x + LIST_BTN_W)
 			return k;
 	}
 	return -1;
@@ -782,9 +966,9 @@ int hit_menu(const UiState *ui, int px, int py)
 
 int hit_tool(int px, int py)
 {
-	if (py < EDIT_VIEW_H || px < 0 || px >= BOT_W)
+	if (py < EDIT_VIEW_H || px < TOOL_X0 || px >= TOOL_X0 + TOOL_COUNT * TOOL_W)
 		return -1;
-	return px / TOOL_W;
+	return (px - TOOL_X0) / TOOL_W;
 }
 
 bool hit_title_button(int px, int py)

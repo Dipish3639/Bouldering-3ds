@@ -10,6 +10,11 @@ const HoldInfo HOLD_INFO[HOLD_TYPES] = {
 	[HOLD_SLOPER] = { "SLOPER", 1.00f, 0.60f, 13 },
 	[HOLD_PINCH]  = { "PINCH",  0.85f, 0.70f, 10 },
 	[HOLD_FOOT]   = { "FOOT",   3.00f, 0.95f, 7 },
+	[HOLD_EDGE]   = { "EDGE",   0.65f, 0.95f, 11 },
+	[HOLD_POCKET] = { "POCKET", 1.50f, 0.50f, 8 },
+	/* Underclings depend on where the body is: see climb.c. */
+	[HOLD_UNDERCLING] = { "UNDERCLING", 1.00f, 0.60f, 11 },
+	[HOLD_VOLUME] = { "VOLUME", 1.40f, 1.00f, 20 },
 };
 
 const char *const ANGLE_NAMES[ANGLE_COUNT] = { "SLAB", "VERTICAL", "OVERHANG", "ROOF" };
@@ -24,7 +29,7 @@ const char *const COLOR_NAMES[ROUTE_COLORS] = {
 float hold_hand_difficulty(int type, int angle)
 {
 	float d = HOLD_INFO[type].hand;
-	if (type == HOLD_SLOPER)
+	if (type == HOLD_SLOPER || type == HOLD_VOLUME)
 		d *= 1.0f + 0.3f * angle;
 	return d;
 }
@@ -34,6 +39,23 @@ void route_init(Route *r, const char *name)
 	memset(r, 0, sizeof(*r));
 	snprintf(r->name, sizeof(r->name), "%s", name);
 	r->angle = ANGLE_VERT;
+	r->grade = GRADE_UNKNOWN;
+}
+
+void route_clear_beta(Route *r)
+{
+	r->grade = GRADE_UNKNOWN;
+	r->nbeta = 0;
+}
+
+void grade_text(char *out, int size, int grade)
+{
+	if (grade == GRADE_UNKNOWN)
+		snprintf(out, size, "V?");
+	else if (grade == GRADE_NONE)
+		snprintf(out, size, "V??");
+	else
+		snprintf(out, size, "V%d", grade);
 }
 
 int route_add_hold(Route *r, int x, int y, int type)
@@ -187,6 +209,7 @@ static void add_sample(RouteBook *b, const char *name, int color, int angle,
 #define S HOLD_SLOPER
 #define P HOLD_PINCH
 #define F HOLD_FOOT
+#define E HOLD_EDGE
 #define ST ROLE_START
 #define TP ROLE_FINISH
 
@@ -219,11 +242,11 @@ static const SampleHold CAVE[] = {
 	{210, 655, F, 0}, {265, 650, J, 0},
 	{200, 530, S, 0}, {245, 515, J, 0}, {230, 610, F, 0}, {185, 585, F, 0},
 	{190, 470, P, 0}, {150, 460, S, 0}, {215, 555, F, 0}, {170, 520, F, 0},
-	{120, 420, J, 0}, {155, 390, C, 0}, {150, 500, F, 0}, {110, 470, F, 0},
+	{120, 420, J, 0}, {155, 390, E, 0}, {150, 500, F, 0}, {110, 470, F, 0},
 	{95, 345, J, 0}, {130, 320, P, 0}, {125, 430, F, 0}, {85, 400, F, 0},
-	{100, 270, J, 0}, {140, 240, C, 0}, {120, 360, F, 0}, {80, 330, F, 0},
+	{100, 270, J, 0}, {140, 240, E, 0}, {120, 360, F, 0}, {80, 330, F, 0},
 	{110, 190, J, 0}, {150, 165, P, 0}, {105, 290, F, 0}, {145, 270, F, 0},
-	{125, 115, P, 0}, {165, 90, S, 0}, {130, 215, F, 0}, {165, 200, F, 0},
+	{125, 115, E, 0}, {165, 90, S, 0}, {130, 215, F, 0}, {165, 200, F, 0},
 	{140, 45, J, TP}, {140, 135, F, 0}, {180, 125, F, 0},
 };
 
@@ -239,7 +262,7 @@ void book_samples(RouteBook *b)
 /* Save file: a small header, then the routes as stored in memory.     */
 
 #define SAVE_MAGIC   0x52444C42u /* "BLDR" */
-#define SAVE_VERSION 1
+#define SAVE_VERSION 2
 
 typedef struct {
 	uint32_t magic;
@@ -247,17 +270,37 @@ typedef struct {
 	uint32_t count;
 } SaveHeader;
 
+/* Version 1 routes: the same fields, without the grade and beta. */
+typedef struct {
+	char name[NAME_LEN + 1];
+	uint8_t color, angle, nholds;
+	Hold holds[MAX_HOLDS];
+	uint32_t bestFrames;
+	uint16_t sends, attempts;
+} RouteV1;
+
 bool book_load(RouteBook *b, const char *path)
 {
 	FILE *f = fopen(path, "rb");
 	if (!f)
 		return false;
 	SaveHeader h;
-	bool ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == SAVE_MAGIC &&
-	          h.version == SAVE_VERSION && h.routeSize == sizeof(Route) && h.count <= MAX_ROUTES;
+	bool ok = fread(&h, sizeof(h), 1, f) == 1 && h.magic == SAVE_MAGIC && h.count <= MAX_ROUTES &&
+	          ((h.version == SAVE_VERSION && h.routeSize == sizeof(Route)) ||
+	           (h.version == 1 && h.routeSize == sizeof(RouteV1)));
 	if (ok) {
 		memset(b, 0, sizeof(*b));
-		ok = fread(b->routes, sizeof(Route), h.count, f) == h.count;
+		for (uint32_t i = 0; i < h.count && ok; i++) {
+			Route *r = &b->routes[i];
+			if (h.version == 1) {
+				RouteV1 old;
+				ok = fread(&old, sizeof(old), 1, f) == 1;
+				memcpy(r, &old, sizeof(old)); /* same leading fields */
+				route_clear_beta(r);
+			} else {
+				ok = fread(r, sizeof(Route), 1, f) == 1;
+			}
+		}
 		b->count = ok ? (int)h.count : 0;
 		for (int i = 0; i < b->count; i++) {
 			Route *r = &b->routes[i];
@@ -268,6 +311,11 @@ bool book_load(RouteBook *b, const char *path)
 			for (int k = 0; k < r->nholds; k++)
 				if (r->holds[k].type >= HOLD_TYPES)
 					r->holds[k].type = HOLD_JUG;
+			if (r->nbeta > MAX_BETA)
+				route_clear_beta(r);
+			for (int k = 0; k < r->nbeta; k++)
+				if (r->beta[k].hold >= r->nholds || r->beta[k].limb >= 4)
+					route_clear_beta(r);
 		}
 	}
 	fclose(f);

@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <math.h>
 #include <string.h>
+#include "beta.h"
+#include "gen.h"
 #include "render.h"
 
 static uint8_t top[TOP_W * TOP_H * 3], bot[BOT_W * BOT_H * 3];
@@ -100,10 +102,15 @@ int main(int argc, char **argv)
 	shot(dir, "title", &ui);
 
 	memset(&ui, 0, sizeof(ui));
-	ui.screen = SCR_LIST; ui.book = &book; ui.listSel = 2;
+	ui.screen = SCR_LIST; ui.book = &book; ui.listSel = LIST_FIRST + 1;
 	shot(dir, "list", &ui);
-	ui.listSel = 0;
+	ui.listSel = LIST_NEW;
 	shot(dir, "list_new", &ui);
+	ui.listSel = LIST_GENERATE;
+	ui.menuOpen = true; ui.menuTitle = "GENERATE A ROUTE"; ui.menuCount = 4; ui.menuSel = 2;
+	const char *gitems[] = { "<  GRADE: V4  >", "<  WALL: OVERHANG  >", "SET IT!", "BACK" };
+	for (int i = 0; i < 4; i++) ui.menuItems[i] = gitems[i];
+	shot(dir, "generate_menu", &ui);
 
 	/* Editor partway up the crimp route. */
 	memset(&ui, 0, sizeof(ui));
@@ -111,9 +118,10 @@ int main(int argc, char **argv)
 	ui.toast = "PLACED CRIMP"; ui.toastTimer = 40;
 	render_wall_texture(book.routes[1].angle);
 	shot(dir, "edit", &ui);
-	ui.menuOpen = true; ui.menuTitle = "EDITOR"; ui.menuCount = 6; ui.menuSel = 1;
-	const char *items[] = { "SAVE & EXIT", "TEST CLIMB", "RENAME", "WALL: VERTICAL", "COLOUR: BLUE", "DISCARD CHANGES" };
-	for (int i = 0; i < 6; i++) ui.menuItems[i] = items[i];
+	ui.menuOpen = true; ui.menuTitle = "EDITOR"; ui.menuSel = 2;
+	const char *items[] = { "SAVE & EXIT", "TEST CLIMB", "WATCH THE BETA", "RENAME", "WALL: VERTICAL", "COLOR: BLUE", "EXIT" };
+	ui.menuCount = 7;
+	for (int i = 0; i < 7; i++) ui.menuItems[i] = items[i];
 	shot(dir, "edit_menu", &ui);
 
 	/* Climbing the cave, mid-move. */
@@ -140,5 +148,53 @@ int main(int argc, char **argv)
 	shot(dir, "topped", &ui);
 	c.state = CL_FELL; c.note = "PUMPED OUT!";
 	shot(dir, "fell", &ui);
+
+	/* Generate a route with every hold type, grade it, and show it in the
+	 * editor and as a beta replay. */
+	static Generator gen;
+	gen_start(&gen, 6, ANGLE_OVERHANG, 77);
+	while (!gen_work(&gen, 1000))
+		;
+	static Route gr;
+	gr = gen.result;
+	/* A few of the new hold types where they're easy to see. */
+	int k;
+	k = route_add_hold(&gr, 40, 470, HOLD_VOLUME); if (k >= 0) gr.holds[k].rot = 0;
+	k = route_add_hold(&gr, 280, 500, HOLD_VOLUME); if (k >= 0) gr.holds[k].rot = 1;
+	route_add_hold(&gr, 45, 535, HOLD_POCKET);
+	route_add_hold(&gr, 275, 560, HOLD_UNDERCLING);
+	route_add_hold(&gr, 40, 600, HOLD_EDGE);
+	render_wall_texture(gr.angle);
+	memset(&ui, 0, sizeof(ui));
+	ui.screen = SCR_EDIT; ui.route = &gr; ui.camY = 440; ui.tool = TOOL_UNDER; ui.activeHold = -1;
+	ui.toast = "UNDERCLING"; ui.toastTimer = 40;
+	shot(dir, "edit_new_holds", &ui);
+
+	/* Watching the beta partway through. */
+	gr = gen.result;
+	climb_start(&c, &gr);
+	for (int i = 0; i < BETA_START_FRAMES; i++) climb_update(&c);
+	int upto = gr.nbeta / 3;
+	for (int i = 0; i < upto; i++) beta_move(&c, gr.beta[i].limb, gr.beta[i].hold, NULL);
+	climb_pick(&c, gr.beta[upto].limb);
+	for (int i = 0; i < 12; i++) { climb_aim(&c, gr.holds[gr.beta[upto].hold].x, gr.holds[gr.beta[upto].hold].y); climb_update(&c); }
+	memset(&ui, 0, sizeof(ui));
+	ui.screen = SCR_CLIMB; ui.route = &gr; ui.climber = &c; ui.camY = cam_for(&c); ui.frame = 5;
+	ui.watching = true; ui.betaStep = upto;
+	static char bt[48];
+	snprintf(bt, sizeof(bt), "%d. %s TO %s", upto + 1, gr.beta[upto].limb == 0 ? "LEFT HAND" : gr.beta[upto].limb == 1 ? "RIGHT HAND" : gr.beta[upto].limb == 2 ? "LEFT FOOT" : "RIGHT FOOT",
+	         HOLD_INFO[gr.holds[gr.beta[upto].hold].type].name);
+	ui.betaText = bt;
+	shot(dir, "watch_beta", &ui);
+
+	/* The working screen while the solver is on the wall. */
+	static Beta b;
+	beta_start(&b, &gr);
+	beta_work(&b, 150);
+	memset(&ui, 0, sizeof(ui));
+	ui.screen = SCR_WORKING; ui.route = &gr; ui.climber = &b.c; ui.frame = 9;
+	ui.camY = fminf(fmaxf(b.c.body.y + 100, TOP_H), WALL_H);
+	ui.workTitle = "SETTING A ROUTE"; ui.workSub = "V6  -  ATTEMPT 2"; ui.workProgress = 0.4f;
+	shot(dir, "working", &ui);
 	return 0;
 }

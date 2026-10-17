@@ -249,3 +249,46 @@ void cv_blit(Canvas *dst, int dx, int dy, const Canvas *src, int sx, int sy, int
 			d[0] = s[0]; d[1] = s[1]; d[2] = s[2];
 		}
 }
+
+void cv_tri(Canvas *cv, float x0, float y0, float x1, float y1, float x2, float y2, uint32_t rgb, int alpha)
+{
+	if (alpha <= 0)
+		return;
+	/* Wind the triangle one way so "inside" is always positive. */
+	if ((x1 - x0) * (y2 - y0) - (y1 - y0) * (x2 - x0) < 0) {
+		float tx = x1, ty = y1;
+		x1 = x2; y1 = y2;
+		x2 = tx; y2 = ty;
+	}
+	float ex[3] = { x0, x1, x2 }, ey[3] = { y0, y1, y2 };
+	float nx[3], ny[3], c[3];
+	for (int i = 0; i < 3; i++) {
+		int k = (i + 1) % 3;
+		float dx = ex[k] - ex[i], dy = ey[k] - ey[i], l = sqrtf(dx * dx + dy * dy);
+		if (l < 1e-4f)
+			return;
+		nx[i] = -dy / l;
+		ny[i] = dx / l;
+		c[i] = -(nx[i] * ex[i] + ny[i] * ey[i]);
+	}
+	int bx0 = (int)floorf(fminf(x0, fminf(x1, x2))) - 1, bx1 = (int)ceilf(fmaxf(x0, fmaxf(x1, x2))) + 1;
+	int by0 = (int)floorf(fminf(y0, fminf(y1, y2))) - 1, by1 = (int)ceilf(fmaxf(y0, fmaxf(y1, y2))) + 1;
+	if (bx0 < 0) bx0 = 0;
+	if (by0 < 0) by0 = 0;
+	if (bx1 > cv->w - 1) bx1 = cv->w - 1;
+	if (by1 > cv->h - 1) by1 = cv->h - 1;
+	int cr = (rgb >> 16) & 0xFF, cg = (rgb >> 8) & 0xFF, cb = rgb & 0xFF;
+	for (int y = by0; y <= by1; y++)
+		for (int x = bx0; x <= bx1; x++) {
+			float px = x + 0.5f, py = y + 0.5f;
+			float d = 1e9f;
+			for (int i = 0; i < 3; i++) {
+				float e = nx[i] * px + ny[i] * py + c[i];
+				if (e < d)
+					d = e;
+			}
+			int cov = coverage(-d);
+			if (cov > 0)
+				shade(cv, x, y, cr, cg, cb, (cov * alpha) >> 8);
+		}
+}

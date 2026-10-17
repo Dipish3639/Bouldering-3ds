@@ -309,6 +309,18 @@ static void dangle(Climber *c)
 	}
 }
 
+float climb_hand_difficulty(const Climber *c, int hand)
+{
+	const Hold *h = &c->route->holds[c->on[hand]];
+	if (h->type != HOLD_UNDERCLING)
+		return hold_hand_difficulty(h->type, c->route->angle);
+	/* An undercling is pulled upwards: great once the shoulder is well above
+	 * it, useless when reaching up to it. */
+	float above = h->y - climb_joint(c, hand).y; /* > 0: hold below the shoulder */
+	float d = 1.6f - above * 0.035f;
+	return d < 0.45f ? 0.45f : d > 2.8f ? 2.8f : d;
+}
+
 static void update_stamina(Climber *c)
 {
 	const Route *r = c->route;
@@ -333,12 +345,14 @@ static void update_stamina(Climber *c)
 		if (!attached(c, h))
 			continue;
 		c->handLoad[h] = load / nh;
-		sum += c->handLoad[h] * hold_hand_difficulty(r->holds[c->on[h]].type, r->angle);
+		sum += c->handLoad[h] * climb_hand_difficulty(c, h);
 	}
 	c->drain = DRAIN_K * sum - RECOVER;
 	if (!c->leftGround && c->on[LIMB_LF] == ON_FLOOR && c->on[LIMB_RF] == ON_FLOOR)
 		c->drain = -RECOVER * 2; /* still standing on the mat */
 	c->stamina -= c->drain;
+	if (c->drain > 0)
+		c->spent += c->drain;
 	if (c->stamina > 1)
 		c->stamina = 1;
 	if (c->stamina <= 0) {

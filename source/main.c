@@ -7,15 +7,25 @@
 #include <sys/stat.h>
 
 #include "audio.h"
+#include "beta.h"
 #include "climb.h"
+#include "gen.h"
 #include "render.h"
 #include "route.h"
 
 #define SAVE_DIR  "sdmc:/3ds/bouldering3ds"
 #define SAVE_PATH SAVE_DIR "/routes.dat"
 
-typedef enum { MODE_TITLE, MODE_LIST, MODE_EDIT, MODE_CLIMB } Mode;
-typedef enum { MENU_NONE, MENU_EDITOR, MENU_PAUSE } MenuKind;
+typedef enum { MODE_TITLE, MODE_LIST, MODE_EDIT, MODE_CLIMB, MODE_WORK } Mode;
+typedef enum { MENU_NONE, MENU_EDITOR, MENU_PAUSE, MENU_GENERATE } MenuKind;
+
+/* Long jobs run a slice per frame on the working screen. */
+typedef enum {
+	JOB_SAVE,      /* grade the edited route, then save it */
+	JOB_WATCH,     /* find the beta, then show it */
+	JOB_GENERATE,  /* set a new route */
+	JOB_GRADE_ALL, /* grade every route that hasn't been (old saves, samples) */
+} Job;
 
 static Mode mode;
 static UiState ui;
@@ -39,6 +49,19 @@ static float aimX, aimY;
 static int pumpTimer;
 /* Last seen value of each climber event counter, for sounds. */
 static struct { int grab, foot, miss, slip, fall, land, top; } heard;
+
+/* Watching the beta: which move is playing and how far into it. */
+static int watchWait, watchFrame;
+static char betaText[48];
+
+static Job job;
+static Mode jobFrom;        /* where B (cancel) goes back to */
+static Route *jobRoute;     /* route being graded */
+static int jobIndex;        /* its slot in the book, or -1 for the editor's route */
+static Beta solver;
+static Generator gen;
+static int genGrade = 3, genAngle = GEN_ANY_ANGLE;
+static char workSub[48];
 
 static MenuKind menuKind;
 static char menuText[MENU_MAX][32];
@@ -75,14 +98,22 @@ static void open_menu(MenuKind kind)
 		ui.menuTitle = "EDITOR";
 		snprintf(menuText[n++], 32, "SAVE & EXIT");
 		snprintf(menuText[n++], 32, "TEST CLIMB");
+		snprintf(menuText[n++], 32, "WATCH THE BETA");
 		snprintf(menuText[n++], 32, "RENAME");
 		snprintf(menuText[n++], 32, "WALL: %s", ANGLE_NAMES[editRoute.angle]);
 		snprintf(menuText[n++], 32, "COLOR: %s", COLOR_NAMES[editRoute.color]);
 		snprintf(menuText[n++], 32, editDirty ? "EXIT WITHOUT SAVING" : "EXIT");
+	} else if (kind == MENU_GENERATE) {
+		ui.menuTitle = "GENERATE A ROUTE";
+		snprintf(menuText[n++], 32, "<  GRADE: V%d  >", genGrade);
+		snprintf(menuText[n++], 32, "<  WALL: %s  >", genAngle == GEN_ANY_ANGLE ? "ANY" : ANGLE_NAMES[genAngle]);
+		snprintf(menuText[n++], 32, "SET IT!");
+		snprintf(menuText[n++], 32, "BACK");
 	} else {
 		ui.menuTitle = "PAUSED";
 		snprintf(menuText[n++], 32, "RESUME");
 		snprintf(menuText[n++], 32, "RESTART");
+		snprintf(menuText[n++], 32, "WATCH THE BETA");
 		snprintf(menuText[n++], 32, climbIndex < 0 ? "BACK TO EDITOR" : "QUIT TO ROUTES");
 	}
 	ui.menuCount = n;
@@ -116,11 +147,23 @@ static void go_list(void)
 	mode = MODE_LIST;
 	ui.confirmDelete = false;
 	close_menu();
-	if (ui.listSel > book.count)
-		ui.listSel = book.count;
+	if (ui.listSel >= LIST_FIRST + book.count)
+		ui.listSel = LIST_FIRST + book.count - 1;
 }
 
-static void start_climb(const Route *r, int index)
+/* Keep the selected row of the route list on screen. */
+static void list_scroll_to_sel(void)
+{
+	if (ui.listSel < ui.listScroll)
+		ui.listScroll = ui.listSel;
+	if (ui.listSel >= ui.listScroll + LIST_ROWS)
+		ui.listScroll = ui.listSel - LIST_ROWS + 1;
+	int maxScroll = LIST_FIRST + book.count - LIST_ROWS;
+	if (ui.listScroll > maxScroll)
+		ui.listScroll = maxScroll < 0 ? 0 : maxScroll;
+}
+
+static void start_climb_mode(const Route *r, int index, bool watch)
 {
 	if (!climb_start(&climber, r)) {
 		const char *p = route_problem(r);
@@ -135,19 +178,31 @@ static void start_climb(const Route *r, int index)
 	memset(&heard, 0, sizeof(heard)); /* climb_start zeroes the counters too */
 	ui.newBest = false;
 	ui.testing = index < 0;
+	ui.watching = watch;
+	ui.betaStep = 0;
+	ui.betaText = NULL;
+	watchWait = watchFrame = 0;
 	ui.camY = WALL_H - BOT_H;
 	close_menu();
 	render_wall_texture(r->angle);
-	if (index >= 0)
+	if (index >= 0 && !watch)
 		book.routes[index].attempts++;
 	audio_sfx(SFX_START);
 }
 
-static void start_edit(int index)
+static void start_climb(const Route *r, int index)
+{
+	start_climb_mode(r, index, false);
+}
+
+/* Open the editor on a route from the book, a new one, or `from` (generated). */
+static void start_edit_from(int index, const Route *from)
 {
 	editIndex = index;
 	if (index >= 0) {
 		editRoute = book.routes[index];
+	} else if (from) {
+		editRoute = *from;
 	} else {
 		char name[32];
 		snprintf(name, sizeof(name), "ROUTE %d", book.count + 1);
@@ -161,6 +216,11 @@ static void start_edit(int index)
 	dragHold = -1;
 	close_menu();
 	render_wall_texture(editRoute.angle);
+}
+
+static void start_edit(int index)
+{
+	start_edit_from(index, NULL);
 }
 
 static void back_to_edit(void)
@@ -189,7 +249,7 @@ static bool save_edit(void)
 			return false;
 		}
 		editIndex = book.count++;
-		ui.listSel = editIndex + 1;
+		ui.listSel = LIST_FIRST + editIndex;
 	} else {
 		/* Edited routes keep their stats, but a changed route is a new problem. */
 		Route *old = &book.routes[editIndex];
@@ -200,9 +260,185 @@ static bool save_edit(void)
 		}
 	}
 	book.routes[editIndex] = editRoute;
+	list_scroll_to_sel();
 	editDirty = false;
 	save_book();
 	return true;
+}
+
+/* ------------------------------------------------------------------ */
+/* Jobs: grading, beta finding and route generation. */
+
+static void start_job(Job j, Route *r, int index)
+{
+	job = j;
+	jobFrom = mode;
+	jobRoute = r;
+	jobIndex = index;
+	close_menu();
+	mode = MODE_WORK;
+	ui.workProgress = 0;
+	ui.workSub = workSub;
+	workSub[0] = 0;
+	switch (j) {
+	case JOB_SAVE:
+		ui.workTitle = "GRADING YOUR ROUTE";
+		snprintf(workSub, sizeof(workSub), "THE BETA FINDER IS ON THE WALL");
+		beta_start(&solver, r);
+		break;
+	case JOB_WATCH:
+		ui.workTitle = "FINDING THE BETA";
+		snprintf(workSub, sizeof(workSub), "TRYING EVERY HAND AND FOOT");
+		beta_start(&solver, r);
+		break;
+	case JOB_GENERATE:
+		ui.workTitle = "SETTING A ROUTE";
+		snprintf(workSub, sizeof(workSub), "V%d  -  %s WALL", genGrade,
+		         genAngle == GEN_ANY_ANGLE ? "ANY" : ANGLE_NAMES[genAngle]);
+		gen_start(&gen, genGrade, genAngle, (uint32_t)svcGetSystemTick());
+		break;
+	case JOB_GRADE_ALL:
+		ui.workTitle = "GRADING ROUTES";
+		jobIndex = -1;
+		break;
+	}
+	render_wall_texture(j == JOB_GENERATE ? ANGLE_VERT : r ? r->angle : ANGLE_VERT);
+	ui.camY = WALL_H;
+}
+
+/* Start watching a route's beta, finding it first if needed. */
+static void watch_beta(Route *r, int index)
+{
+	if (r->grade == GRADE_UNKNOWN) {
+		if (route_problem(r)) {
+			toast(route_problem(r));
+			return;
+		}
+		start_job(JOB_WATCH, r, index);
+		return;
+	}
+	if (r->nbeta == 0) {
+		toast("NO WAY UP FOUND ON THIS ONE");
+		return;
+	}
+	start_climb_mode(r, index, true);
+}
+
+static void save_and_exit(void)
+{
+	if (editRoute.grade == GRADE_UNKNOWN && !route_problem(&editRoute)) {
+		start_job(JOB_SAVE, &editRoute, -1);
+		return;
+	}
+	if (save_edit())
+		go_list();
+}
+
+/* The next route the grade-all job should look at, from jobIndex on. */
+static int next_ungraded(int from)
+{
+	for (int i = from; i < book.count; i++)
+		if (book.routes[i].grade == GRADE_UNKNOWN && !route_problem(&book.routes[i]))
+			return i;
+	return -1;
+}
+
+static void job_cancel(void)
+{
+	audio_sfx(SFX_MENU_MOVE);
+	if (job == JOB_GRADE_ALL) {
+		save_book();
+		go_title();
+	} else if (jobFrom == MODE_EDIT) {
+		back_to_edit();
+	} else {
+		go_list();
+	}
+}
+
+/* Called when a solver run on jobRoute is finished. */
+static void job_solved(void)
+{
+	static char msg[48];
+	beta_store(&solver, jobRoute);
+	char g[8];
+	grade_text(g, sizeof(g), jobRoute->grade);
+	if (job == JOB_SAVE) {
+		if (jobRoute->grade == GRADE_NONE)
+			snprintf(msg, sizeof(msg), "SAVED - NO WAY UP FOUND (YET)");
+		else
+			snprintf(msg, sizeof(msg), "SAVED AS %s  -  %d MOVES", g, jobRoute->nbeta);
+		mode = MODE_EDIT;
+		if (save_edit()) {
+			go_list();
+			toast(msg);
+			audio_sfx(SFX_TOP);
+		}
+	} else if (job == JOB_WATCH) {
+		if (jobIndex >= 0)
+			save_book();
+		mode = jobFrom;
+		if (jobRoute->nbeta == 0) {
+			if (jobFrom == MODE_EDIT) back_to_edit(); else go_list();
+			toast("NO WAY UP FOUND ON THIS ONE");
+		} else {
+			start_climb_mode(jobRoute, jobIndex, true);
+		}
+	}
+}
+
+/* Spend about one frame's worth of time on the current job. */
+static void job_work(void)
+{
+	u64 start = svcGetSystemTick();
+	const u64 budget = SYSCLOCK_ARM11 / 45;
+	do {
+		switch (job) {
+		case JOB_SAVE:
+		case JOB_WATCH:
+			if (beta_work(&solver, 2)) {
+				job_solved();
+				return;
+			}
+			ui.workProgress = beta_progress(&solver);
+			break;
+		case JOB_GENERATE:
+			if (gen_work(&gen, 2)) {
+				if (gen.status == GEN_DONE) {
+					static char msg[48];
+					snprintf(msg, sizeof(msg), "SET: %s  V%d", gen.result.name, gen.result.grade);
+					start_edit_from(-1, &gen.result);
+					toast(msg);
+					audio_sfx(SFX_TOP);
+				} else {
+					go_list();
+					toast("COULDN'T SET ONE - TRY AGAIN");
+				}
+				return;
+			}
+			ui.workProgress = gen_progress(&gen);
+			snprintf(workSub, sizeof(workSub), "V%d  -  ATTEMPT %d", genGrade, gen.attempts);
+			break;
+		case JOB_GRADE_ALL:
+			if (jobIndex < 0 || solver.status != BETA_WORKING) {
+				if (jobIndex >= 0)
+					beta_store(&solver, &book.routes[jobIndex]);
+				jobIndex = next_ungraded(jobIndex + 1);
+				if (jobIndex < 0) {
+					save_book();
+					go_title();
+					return;
+				}
+				jobRoute = &book.routes[jobIndex];
+				render_wall_texture(jobRoute->angle);
+				beta_start(&solver, jobRoute);
+				snprintf(workSub, sizeof(workSub), "%s", jobRoute->name);
+			}
+			beta_work(&solver, 2);
+			ui.workProgress = beta_progress(&solver);
+			break;
+		}
+	} while (svcGetSystemTick() - start < budget);
 }
 
 static void rename_route(void)
@@ -236,32 +472,35 @@ static void menu_choose(int item)
 	if (menuKind == MENU_EDITOR) {
 		switch (item) {
 		case 0:
-			if (save_edit())
-				go_list();
+			save_and_exit();
 			break;
 		case 1:
 			close_menu();
 			start_climb(&editRoute, -1);
 			break;
 		case 2:
-			rename_route();
-			open_menu(MENU_EDITOR);
-			ui.menuSel = 2;
+			watch_beta(&editRoute, -1);
 			break;
 		case 3:
-			editRoute.angle = (uint8_t)((editRoute.angle + 1) % ANGLE_COUNT);
-			editDirty = true;
-			render_wall_texture(editRoute.angle);
+			rename_route();
 			open_menu(MENU_EDITOR);
 			ui.menuSel = 3;
 			break;
 		case 4:
-			editRoute.color = (uint8_t)((editRoute.color + 1) % ROUTE_COLORS);
+			editRoute.angle = (uint8_t)((editRoute.angle + 1) % ANGLE_COUNT);
 			editDirty = true;
+			route_clear_beta(&editRoute);
+			render_wall_texture(editRoute.angle);
 			open_menu(MENU_EDITOR);
 			ui.menuSel = 4;
 			break;
 		case 5:
+			editRoute.color = (uint8_t)((editRoute.color + 1) % ROUTE_COLORS);
+			editDirty = true;
+			open_menu(MENU_EDITOR);
+			ui.menuSel = 5;
+			break;
+		case 6:
 			go_list();
 			break;
 		}
@@ -269,7 +508,30 @@ static void menu_choose(int item)
 		switch (item) {
 		case 0: close_menu(); break;
 		case 1: start_climb(climbRoute, climbIndex); break;
-		case 2: leave_climb(); break;
+		case 2:
+			close_menu();
+			watch_beta(climbIndex >= 0 ? &book.routes[climbIndex] : &editRoute, climbIndex);
+			break;
+		case 3: leave_climb(); break;
+		}
+	} else if (menuKind == MENU_GENERATE) {
+		switch (item) {
+		case 0:
+			genGrade = (genGrade + 1) % 11;
+			open_menu(MENU_GENERATE);
+			ui.menuSel = 0;
+			break;
+		case 1:
+			genAngle = genAngle + 1 >= ANGLE_COUNT ? GEN_ANY_ANGLE : genAngle + 1;
+			open_menu(MENU_GENERATE);
+			ui.menuSel = 1;
+			break;
+		case 2:
+			start_job(JOB_GENERATE, NULL, -1);
+			break;
+		case 3:
+			close_menu();
+			break;
 		}
 	}
 }
@@ -286,6 +548,17 @@ static bool menu_input(u32 down, const touchPosition *t)
 	if (down & (KEY_DDOWN | KEY_CPAD_DOWN)) {
 		ui.menuSel = (ui.menuSel + 1) % ui.menuCount;
 		audio_sfx(SFX_MENU_MOVE);
+	}
+	if (menuKind == MENU_GENERATE && ui.menuSel <= 1 && (down & (KEY_DLEFT | KEY_DRIGHT | KEY_CPAD_LEFT | KEY_CPAD_RIGHT))) {
+		int d = (down & (KEY_DLEFT | KEY_CPAD_LEFT)) ? -1 : 1;
+		if (ui.menuSel == 0)
+			genGrade = (genGrade + d + 11) % 11;
+		else
+			genAngle = (genAngle + 1 + d + ANGLE_COUNT + 1) % (ANGLE_COUNT + 1) - 1;
+		int sel = ui.menuSel;
+		open_menu(MENU_GENERATE);
+		ui.menuSel = sel;
+		return true;
 	}
 	if (down & (KEY_B | KEY_START)) {
 		close_menu();
@@ -310,21 +583,18 @@ static bool menu_input(u32 down, const touchPosition *t)
 
 static void list_select(int sel)
 {
-	if (sel < 0 || sel > book.count)
+	if (sel < 0 || sel >= LIST_FIRST + book.count)
 		return;
 	if (sel != ui.listSel)
 		audio_sfx(SFX_MENU_MOVE);
 	ui.listSel = sel;
 	ui.confirmDelete = false;
-	if (ui.listSel < ui.listScroll)
-		ui.listScroll = ui.listSel;
-	if (ui.listSel >= ui.listScroll + LIST_ROWS)
-		ui.listScroll = ui.listSel - LIST_ROWS + 1;
+	list_scroll_to_sel();
 }
 
 static void list_action(int action)
 {
-	int i = ui.listSel - 1;
+	int i = ui.listSel - LIST_FIRST;
 	switch (action) {
 	case LBTN_BACK:
 		go_title();
@@ -341,19 +611,26 @@ static void list_action(int action)
 			save_book();
 			audio_sfx(SFX_ERASE);
 			ui.confirmDelete = false;
-			if (ui.listSel > book.count)
-				ui.listSel = book.count;
-			if (ui.listScroll > 0 && ui.listScroll + LIST_ROWS > book.count + 1)
-				ui.listScroll--;
+			if (ui.listSel >= LIST_FIRST + book.count)
+				ui.listSel = LIST_FIRST + book.count - 1;
+			list_scroll_to_sel();
 		}
 		break;
 	case LBTN_EDIT:
+		if (ui.listSel == LIST_GENERATE) {
+			open_menu(MENU_GENERATE);
+			break;
+		}
 		if (i < 0 && book.count >= MAX_ROUTES) {
 			toast("DELETE A ROUTE FIRST");
 			break;
 		}
 		audio_sfx(SFX_MENU_SELECT);
-		start_edit(i);
+		start_edit(i < 0 ? -1 : i);
+		break;
+	case LBTN_BETA:
+		if (i >= 0)
+			watch_beta(&book.routes[i], i);
 		break;
 	case LBTN_CLIMB:
 		if (i >= 0)
@@ -364,21 +641,23 @@ static void list_action(int action)
 
 static void list_input(u32 down, const touchPosition *t)
 {
+	bool route = ui.listSel >= LIST_FIRST;
 	if (down & (KEY_DUP | KEY_CPAD_UP))
 		list_select(ui.listSel - 1);
 	if (down & (KEY_DDOWN | KEY_CPAD_DOWN))
 		list_select(ui.listSel + 1);
-	if (down & KEY_B)      list_action(LBTN_BACK);
-	else if (down & KEY_Y) list_action(LBTN_DELETE);
-	else if (down & KEY_X) list_action(LBTN_EDIT);
-	else if (down & KEY_A) list_action(ui.listSel == 0 ? LBTN_EDIT : LBTN_CLIMB);
+	if (down & KEY_B)           list_action(LBTN_BACK);
+	else if (down & KEY_Y)      list_action(LBTN_DELETE);
+	else if (down & KEY_X)      list_action(LBTN_EDIT);
+	else if (down & KEY_SELECT) list_action(LBTN_BETA);
+	else if (down & KEY_A)      list_action(route ? LBTN_CLIMB : LBTN_EDIT);
 	if (down & KEY_TOUCH) {
 		int row = hit_list_row(&ui, t->px, t->py);
 		int btn = hit_list_button(t->px, t->py);
 		if (row >= 0) {
 			/* Tapping the selected row again opens it. */
 			if (row == ui.listSel)
-				list_action(row == 0 ? LBTN_EDIT : LBTN_CLIMB);
+				list_action(row >= LIST_FIRST ? LBTN_CLIMB : LBTN_EDIT);
 			else
 				list_select(row);
 		} else if (btn >= 0) {
@@ -394,6 +673,13 @@ static void clamp_edit_cam(void)
 {
 	if (ui.camY < 0) ui.camY = 0;
 	if (ui.camY > WALL_H - EDIT_VIEW_H) ui.camY = WALL_H - EDIT_VIEW_H;
+}
+
+/* Any change to the holds makes the old grade and beta wrong. */
+static void holds_changed(void)
+{
+	editDirty = true;
+	route_clear_beta(&editRoute);
 }
 
 static void edit_tap_hold(int h)
@@ -425,18 +711,18 @@ static void edit_tap_hold(int h)
 	case TOOL_ERASE:
 		route_remove_hold(&editRoute, h);
 		audio_sfx(SFX_ERASE);
-		editDirty = true;
+		holds_changed();
 		return;
 	default:
 		/* Same type: turn it. Different type: swap it. */
-		if (hd->type == ui.tool)
+		if (hd->type == TOOL_HOLD[ui.tool])
 			hd->rot = (uint8_t)((hd->rot + 1) & 3);
 		else
-			hd->type = (uint8_t)ui.tool;
+			hd->type = (uint8_t)TOOL_HOLD[ui.tool];
 		break;
 	}
 	audio_sfx(SFX_PLACE);
-	editDirty = true;
+	holds_changed();
 }
 
 static void edit_input(u32 down, u32 held, u32 up, const touchPosition *t, const circlePosition *cp)
@@ -450,12 +736,9 @@ static void edit_input(u32 down, u32 held, u32 up, const touchPosition *t, const
 	ui.camY += scroll;
 	clamp_edit_cam();
 
-	if (down & KEY_L) {
-		ui.tool = (ui.tool + TOOL_COUNT - 1) % TOOL_COUNT;
-		audio_sfx(SFX_MENU_MOVE);
-	}
-	if (down & KEY_R) {
-		ui.tool = (ui.tool + 1) % TOOL_COUNT;
+	if (down & (KEY_L | KEY_R)) {
+		ui.tool = (ui.tool + ((down & KEY_L) ? TOOL_COUNT - 1 : 1)) % TOOL_COUNT;
+		toast(TOOL_NAMES[ui.tool]);
 		audio_sfx(SFX_MENU_MOVE);
 	}
 	if (down & KEY_X) {
@@ -472,6 +755,7 @@ static void edit_input(u32 down, u32 held, u32 up, const touchPosition *t, const
 		int tool = hit_tool(t->px, t->py);
 		if (tool >= 0) {
 			ui.tool = tool;
+			toast(TOOL_NAMES[tool]);
 			audio_sfx(SFX_MENU_MOVE);
 			return;
 		}
@@ -482,12 +766,12 @@ static void edit_input(u32 down, u32 held, u32 up, const touchPosition *t, const
 		dragStartY = t->py;
 		if (h >= 0) {
 			dragHold = h;
-		} else if (ui.tool < HOLD_TYPES) {
+		} else if (TOOL_HOLD[ui.tool] >= 0) {
 			if (wy > HOLD_MAX_Y + 6) {
 				toast("THAT'S THE CRASH PAD");
 				return;
 			}
-			int k = route_add_hold(&editRoute, (int)wx, (int)wy, ui.tool);
+			int k = route_add_hold(&editRoute, (int)wx, (int)wy, TOOL_HOLD[ui.tool]);
 			if (k < 0) {
 				toast("ROUTE IS FULL (48 HOLDS)");
 				return;
@@ -495,7 +779,7 @@ static void edit_input(u32 down, u32 held, u32 up, const touchPosition *t, const
 			editRoute.holds[k].rot = (uint8_t)(editRoute.nholds & 3);
 			dragHold = k;
 			dragNew = true;
-			editDirty = true;
+			holds_changed();
 			audio_sfx(SFX_PLACE);
 		} else if (ui.tool != TOOL_ERASE) {
 			toast("TAP A HOLD TO MARK IT");
@@ -512,7 +796,7 @@ static void edit_input(u32 down, u32 held, u32 up, const touchPosition *t, const
 			Hold *hd = &editRoute.holds[dragHold];
 			hd->x = (int16_t)(x < 8 ? 8 : x > WALL_W - 8 ? WALL_W - 8 : x);
 			hd->y = (int16_t)(y < 8 ? 8 : y > HOLD_MAX_Y ? HOLD_MAX_Y : y);
-			editDirty = true;
+			holds_changed();
 		}
 	}
 	if ((up & KEY_TOUCH) && dragHold >= 0) {
@@ -541,6 +825,22 @@ static const u32 LIMB_KEYS[LIMBS] = { KEY_L, KEY_R, KEY_Y, KEY_A };
 
 static void climb_input(u32 down, u32 held, u32 up, const touchPosition *t, const circlePosition *cp)
 {
+	if (ui.watching) {
+		/* The beta plays by itself; A replays it at the end, B leaves. */
+		if (down & (KEY_B | KEY_START))
+			leave_climb();
+		else if ((down & KEY_A) && climber.state != CL_CLIMBING)
+			start_climb_mode(climbRoute, climbIndex, true);
+		return;
+	}
+	if (down & KEY_SELECT) {
+		if (climbRoute->nbeta) {
+			ui.showBeta = !ui.showBeta;
+			toast(ui.showBeta ? "BETA SHOWN: FOLLOW THE NUMBERS" : "BETA HIDDEN");
+		} else {
+			toast("NO BETA YET: TRY WATCH THE BETA");
+		}
+	}
 	if (climber.state == CL_TOPPED || climber.state == CL_FELL) {
 		if (down & KEY_A)
 			start_climb(climbRoute, climbIndex);
@@ -650,11 +950,49 @@ static void climb_sounds(void)
 	}
 }
 
+static const char *const LIMB_WORDS[LIMBS] = { "LEFT HAND", "RIGHT HAND", "LEFT FOOT", "RIGHT FOOT" };
+
+/* One frame of the beta playing itself, timed exactly like beta_move so it
+ * repeats the solver's climb. */
+static void watch_tick(void)
+{
+	const Route *r = climbRoute;
+	if (watchWait < BETA_START_FRAMES) {
+		watchWait++;
+		climb_update(&climber);
+		return;
+	}
+	if (ui.betaStep >= r->nbeta || climber.state != CL_CLIMBING) {
+		climb_update(&climber);
+		return;
+	}
+	const BetaMove *m = &r->beta[ui.betaStep];
+	const Hold *h = &r->holds[m->hold];
+	if (watchFrame == 0) {
+		climb_pick(&climber, m->limb);
+		snprintf(betaText, sizeof(betaText), "%d. %s TO %s", ui.betaStep + 1, LIMB_WORDS[m->limb],
+		         h->role == ROLE_FINISH ? "THE TOP" : HOLD_INFO[h->type].name);
+		ui.betaText = betaText;
+	}
+	if (watchFrame < BETA_REACH_FRAMES)
+		climb_aim(&climber, h->x, h->y);
+	else if (watchFrame == BETA_REACH_FRAMES)
+		climb_release(&climber);
+	climb_update(&climber);
+	if (++watchFrame >= BETA_REACH_FRAMES + BETA_SETTLE_FRAMES) {
+		watchFrame = 0;
+		ui.betaStep++;
+	}
+}
+
 static void climb_step(void)
 {
 	int wasState = climber.state;
-	climb_update(&climber);
-	if (climber.state == CL_TOPPED && wasState != CL_TOPPED && climbIndex >= 0) {
+	if (ui.watching)
+		watch_tick();
+	else
+		climb_update(&climber);
+	if (climber.state == CL_TOPPED && wasState != CL_TOPPED && climbIndex >= 0 && !ui.watching) {
 		Route *r = &book.routes[climbIndex];
 		r->sends++;
 		if (!r->bestFrames || (uint32_t)climber.frames < r->bestFrames) {
@@ -706,6 +1044,22 @@ static void fill_ui(void)
 		ui.route = climbRoute;
 		ui.climber = &climber;
 		break;
+	case MODE_WORK: {
+		ui.screen = SCR_WORKING;
+		const Beta *b = job == JOB_GENERATE ? &gen.beta : &solver;
+		bool live = job == JOB_GENERATE ? gen.solving : b->status == BETA_WORKING && b->route;
+		ui.route = live ? b->route : NULL;
+		ui.climber = live ? &b->c : NULL;
+		if (live) {
+			render_wall_texture(b->route->angle);
+			/* Only the top screen shows the wall here: keep the climber on it. */
+			float target = b->c.body.y + 100;
+			if (target < TOP_H) target = TOP_H;
+			if (target > WALL_H) target = WALL_H;
+			ui.camY += (target - ui.camY) * 0.15f;
+		}
+		break;
+	}
 	}
 }
 
@@ -764,8 +1118,11 @@ int main(void)
 		book_samples(&book);
 		save_book();
 	}
-	ui.listSel = book.count > 0 ? 1 : 0;
+	ui.listSel = book.count > 0 ? LIST_FIRST : LIST_NEW;
 	go_title();
+	/* Routes from older saves (and the samples) get their grade and beta now. */
+	if (next_ungraded(0) >= 0)
+		start_job(JOB_GRADE_ALL, NULL, -1);
 
 	/* Logic runs on a fixed 60 Hz clock, however long a frame takes to draw. */
 	u64 lastTick = svcGetSystemTick();
@@ -816,6 +1173,12 @@ int main(void)
 			break;
 		case MODE_CLIMB:
 			climb_input(down, held, up, &touch, &cp);
+			break;
+		case MODE_WORK:
+			if (down & KEY_B)
+				job_cancel();
+			else
+				job_work();
 			break;
 		}
 

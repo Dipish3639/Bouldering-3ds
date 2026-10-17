@@ -3,6 +3,6 @@
 set -e
 out=${1:-preview}
 mkdir -p "$out"
-cc -std=gnu11 -O2 -Wall -Isource tools/preview.c source/render.c source/gfx.c \
+cc -std=gnu11 -O2 -Wall -Isource tools/preview.c source/beta.c source/gen.c source/render.c source/gfx.c \
    source/climb.c source/route.c source/font_data.c -lm -o "$out/preview"
 "$out/preview" "$out"

@@ -18,18 +18,30 @@
 
 /* Editor: wall view above a toolbar on the bottom screen. */
 #define EDIT_VIEW_H 200
-#define TOOL_W      40
+#define TOOL_W      26
+#define TOOL_X0     4
 
-enum { TOOL_JUG, TOOL_CRIMP, TOOL_SLOPER, TOOL_PINCH, TOOL_FOOT, TOOL_START, TOOL_TOP, TOOL_ERASE, TOOL_COUNT };
+enum {
+	TOOL_JUG, TOOL_EDGE, TOOL_CRIMP, TOOL_POCKET, TOOL_SLOPER, TOOL_PINCH, TOOL_UNDER, TOOL_VOLUME, TOOL_FOOT,
+	TOOL_START, TOOL_TOP, TOOL_ERASE, TOOL_COUNT
+};
 extern const char *const TOOL_NAMES[TOOL_COUNT];
+extern const char *const TOOL_SHORT[TOOL_COUNT];
+/* Hold type a tool places, or -1 for START / TOP / ERASE. */
+extern const int8_t TOOL_HOLD[TOOL_COUNT];
 
-/* Route list layout: a "new route" row, then one row per route. */
+/* Route list layout: "new route" and "generate" rows, then one row per route. */
+#define LIST_NEW       0
+#define LIST_GENERATE  1
+#define LIST_FIRST     2 /* row of book->routes[0] */
 #define LIST_Y       32
 #define LIST_ROW_H   28
 #define LIST_ROWS    5
 #define LIST_BTN_Y   184
 #define LIST_BTN_H   48
-enum { LBTN_BACK, LBTN_DELETE, LBTN_EDIT, LBTN_CLIMB, LBTN_COUNT };
+#define LIST_BTN_W   60
+#define LIST_BTN_STEP 64
+enum { LBTN_BACK, LBTN_DELETE, LBTN_EDIT, LBTN_BETA, LBTN_CLIMB, LBTN_COUNT };
 
 /* Pop-up menu on the bottom screen. */
 #define MENU_X     40
@@ -44,7 +56,7 @@ enum { LBTN_BACK, LBTN_DELETE, LBTN_EDIT, LBTN_CLIMB, LBTN_COUNT };
 #define TITLE_BTN_W 200
 #define TITLE_BTN_H 64
 
-typedef enum { SCR_LOADING, SCR_TITLE, SCR_LIST, SCR_EDIT, SCR_CLIMB } Screen;
+typedef enum { SCR_LOADING, SCR_TITLE, SCR_LIST, SCR_EDIT, SCR_CLIMB, SCR_WORKING } Screen;
 
 typedef struct {
 	Screen screen;
@@ -56,7 +68,7 @@ typedef struct {
 
 	/* Route list. */
 	const RouteBook *book;
-	int listSel;        /* 0 = new route, k = book->routes[k - 1] */
+	int listSel;        /* LIST_NEW, LIST_GENERATE, or LIST_FIRST + route index */
 	int listScroll;
 	bool confirmDelete;
 
@@ -69,6 +81,16 @@ typedef struct {
 	bool testing;       /* climbing straight from the editor */
 	bool newBest;
 
+	/* Beta: numbered moves on the holds, and the step being shown when
+	 * watching the solver's climb. */
+	bool showBeta, watching;
+	int betaStep;
+	const char *betaText;
+
+	/* Working screen (solver / generator running). */
+	const char *workTitle, *workSub;
+	float workProgress;
+
 	/* Pop-up menu. */
 	bool menuOpen;
 	const char *menuTitle;
@@ -79,6 +101,9 @@ typedef struct {
 /* Rebuild the wall texture for a wall angle (cheap to call every frame:
  * it only does work when the angle changes). */
 void render_wall_texture(int angle);
+
+/* The grade to show for a route: the solver's, or "~V3" from the holds. */
+void route_grade_label(char *out, int size, const Route *r);
 
 /* Fill a buffer with the static top-screen backdrop (HUD margins). */
 void render_top_backdrop(Canvas *cv);
